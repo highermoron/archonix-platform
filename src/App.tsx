@@ -220,6 +220,10 @@ function parseCsv(source: string): string[][] {
   return rows;
 }
 
+const LEGACY_GLOBAL_DEMO_IMAGE_URL = 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80';
+const LEGACY_DCM_DEMO_IMAGE_URL = 'https://dcmyesschool.com/storage/assets/hero-banners/1791887233_website%20banner%20%2802%29.jpg';
+const LEGACY_DCM_DEMO_DESCRIPTION = 'Urgent assessment requested by the user. The official school website photo is a visual reference only, not inspection evidence. No on-site inspection or structural findings are recorded; construction year and floor count are unverified.';
+
 // --- INITIAL GLOBAL DEMO DATA WITH REPRESENTATIVE COORDINATES ---
 const INITIAL_BUILDINGS: Building[] = [
   {
@@ -235,7 +239,7 @@ const INITIAL_BUILDINGS: Building[] = [
     status: 'Low Concern',
     healthIndex: 94.5,
     lastScanDate: '10 November 2026',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80',
+    imageUrl: 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80',
     incidentNote: 'Minor basement efflorescence logged on Level B2 North Wall.'
   },
   {
@@ -282,7 +286,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-002',
@@ -296,7 +300,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1518391846015-55a9cc003b25?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-003',
@@ -310,7 +314,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-004',
@@ -324,7 +328,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1512453979798-5ea266f8880c?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-005',
@@ -338,7 +342,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1525625293386-3f8f99389edd?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-006',
@@ -352,7 +356,7 @@ const INITIAL_BUILDINGS: Building[] = [
     description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
     status: 'Monitoring Required',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+    imageUrl: 'https://images.unsplash.com/photo-1536098561742-ca998e48cbcc?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bld-world-007',
@@ -363,10 +367,10 @@ const INITIAL_BUILDINGS: Building[] = [
     type: 'Institutional',
     year: 0,
     floors: 0,
-    description: 'Urgent assessment requested by the user. No on-site inspection or structural findings are recorded; construction year and floor count are unverified.',
+    description: 'Urgent assessment requested by the user. The official school website campus illustration is for visual reference only, not a site photo or inspection evidence. No on-site inspection or structural findings are recorded; construction year and floor count are unverified.',
     status: 'Urgent Assessment',
     lastScanDate: 'Not scanned',
-    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80',
+    imageUrl: 'https://dcmyesschool.com/storage/facilities/01.png',
     incidentNote: 'User-requested urgent assessment designation; no inspection findings recorded.'
   }
 ];
@@ -718,7 +722,22 @@ export default function App() {
       );
       const loadedBuildings = demoScope
         ? [
-            ...savedBuildings,
+            ...savedBuildings.map(saved => {
+              const initial = INITIAL_BUILDINGS.find(building => building.id === saved.id);
+              if (!initial) return saved;
+
+              const needsImageUpdate = saved.imageUrl === LEGACY_GLOBAL_DEMO_IMAGE_URL
+                || (saved.id === 'bld-world-007' && saved.imageUrl === LEGACY_DCM_DEMO_IMAGE_URL);
+              const needsSchoolDescriptionUpdate = saved.id === 'bld-world-007'
+                && saved.description === LEGACY_DCM_DEMO_DESCRIPTION;
+              return needsImageUpdate || needsSchoolDescriptionUpdate
+                ? {
+                    ...saved,
+                    imageUrl: needsImageUpdate ? initial.imageUrl : saved.imageUrl,
+                    description: needsSchoolDescriptionUpdate ? initial.description : saved.description
+                  }
+                : saved;
+            }),
             ...INITIAL_BUILDINGS.filter(initial =>
               !savedBuildings.some(saved => saved.id === initial.id)
             )
