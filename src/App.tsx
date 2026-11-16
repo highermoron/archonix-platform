@@ -1,24 +1,35 @@
-import React, { useState, useEffect, useRef } from 'react';
-import L from 'leaflet';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useSupabaseBuildings } from './hooks/useSupabaseBuildings';
+import WorldMap from './WorldMap';
+import { supabase } from './lib/supabase';
+import type { UserRole } from './archonix';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { 
   Building2, ShieldAlert, Cpu, Activity, FileText, Settings, 
-  Bell, Plus, Upload, ArrowRight, Eye, AlertTriangle, RefreshCw, 
-  LogOut, Lock, Mail, Menu, X, Zap, Layers, ArrowUpRight, 
-  Compass, Download, MapPin
+  Bell, Plus, Upload, ArrowRight, Eye,
+  LogOut, Lock, Mail, Menu, X, Zap, Layers,
+  Compass, Download, MapPin, Search, ClipboardCheck, Clock, Users,
+  CheckCircle, CircleAlert, History, Trash2, FileUp, CalendarClock
 } from 'lucide-react';
 
 // --- TYPES ---
 type Screen = 
   | 'login' 
+  | 'onboarding'
+  | 'password-reset'
   | 'dashboard' 
   | 'map'
   | 'buildings' 
   | 'add-building' 
+  | 'import-buildings'
   | 'scan' 
   | 'diagnosis' 
+  | 'review-queue'
+  | 'audit-log'
   | 'monitor' 
   | 'alerts' 
   | 'recommendations' 
+  | 'work-orders'
   | 'reports' 
   | 'settings';
 
@@ -33,7 +44,7 @@ interface Building {
   floors: number;
   description: string;
   status: 'Low Concern' | 'Inspection Recommended' | 'Monitoring Required' | 'Urgent Assessment';
-  healthIndex: number;
+  healthIndex?: number;
   lastScanDate: string;
   imageUrl: string;
   incidentNote?: string;
@@ -48,6 +59,9 @@ interface AlertItem {
   description: string;
   recommendation: string;
   read: boolean;
+  buildingId?: string;
+  scanId?: string;
+  source?: 'manual' | 'demo';
 }
 
 interface ScanRecord {
@@ -62,6 +76,148 @@ interface ScanRecord {
   concernLevel: 'Low Concern' | 'Moderate Concern' | 'High Concern' | 'Urgent Professional Assessment';
   observations: string[];
   summary: string;
+  source?: 'manual' | 'demo';
+  reviewStatus?: 'Draft' | 'Submitted' | 'Under Review' | 'Changes Requested' | 'Approved' | 'Closed';
+  checklist?: { label: string; complete: boolean }[];
+  checklistTemplateId?: string;
+  createdBy?: string;
+  reviewerNotes?: string[];
+  updatedAt?: string;
+}
+
+interface WorkOrder {
+  id: string;
+  buildingId: string;
+  title: string;
+  description: string;
+  assignedTo: string;
+  dueDate: string;
+  status: 'Open' | 'In Progress' | 'Completed';
+  relatedScanId?: string;
+  createdAt: string;
+}
+
+interface ChecklistTemplate {
+  id: string;
+  name: string;
+  component: string;
+  items: string[];
+}
+
+interface AuditEvent {
+  id: string;
+  action: string;
+  entity: string;
+  entityId: string;
+  actor: string;
+  timestamp: string;
+  details: string;
+}
+
+interface OrganizationMembership {
+  id: string;
+  name: string;
+  role: UserRole;
+}
+
+interface CsvImportRow {
+  building: Building;
+  line: number;
+}
+
+const DEFAULT_CHECKLIST: ChecklistTemplate = {
+  id: 'checklist-general-visual',
+  name: 'General visual inspection',
+  component: 'All',
+  items: [
+    'Photograph the component and its surrounding context',
+    'Record visible cracking, separation, or displacement',
+    'Note visible moisture, staining, or corrosion',
+    'Record the component location and access limitations',
+    'Compare with prior records where available'
+  ]
+};
+
+function isUserRole(value: unknown): value is UserRole {
+  return value === 'administrator' || value === 'structural_engineer' || value === 'inspector' || value === 'viewer';
+}
+
+async function readOrganizationMembership(userId: string): Promise<OrganizationMembership | null> {
+  if (!supabase) throw new Error('Supabase is not configured.');
+  const { data: membership, error } = await supabase
+    .from('organization_memberships')
+    .select('organization_id, role')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!membership) return null;
+
+  const { data: organization, error: organizationError } = await supabase
+    .from('organizations')
+    .select('name')
+    .eq('id', membership.organization_id)
+    .single();
+  if (organizationError) throw organizationError;
+  if (!isUserRole(membership.role)) throw new Error('The organization has an unsupported member role.');
+  return { id: membership.organization_id, name: organization.name, role: membership.role };
+}
+
+function parseCsv(source: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  let closedQuote = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"' && source[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = false;
+        closedQuote = true;
+      } else {
+        field += character;
+      }
+    } else if (closedQuote) {
+      if (character === ',') {
+        row.push(field.trim());
+        field = '';
+        closedQuote = false;
+      } else if (character === '\n' || character === '\r') {
+        if (character === '\r' && source[index + 1] === '\n') index += 1;
+        row.push(field.trim());
+        if (row.some(value => value.length > 0)) rows.push(row);
+        row = [];
+        field = '';
+        closedQuote = false;
+      } else if (!/\s/.test(character)) {
+        throw new Error('CSV contains unexpected characters after a quoted field.');
+      }
+    } else if (character === '"' && field.length === 0) {
+      quoted = true;
+    } else if (character === '"') {
+      throw new Error('CSV contains a quote inside an unquoted field.');
+    } else if (character === ',') {
+      row.push(field.trim());
+      field = '';
+    } else if (character === '\n' || character === '\r') {
+      if (character === '\r' && source[index + 1] === '\n') index += 1;
+      row.push(field.trim());
+      if (row.some(value => value.length > 0)) rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += character;
+    }
+  }
+
+  if (quoted) throw new Error('CSV contains an unclosed quoted field.');
+  row.push(field.trim());
+  if (row.some(value => value.length > 0)) rows.push(row);
+  return rows;
 }
 
 // --- INITIAL DEMO DATA (AUSTRALIAN CONTEXT WITH COORDINATES) ---
@@ -123,9 +279,12 @@ const INITIAL_ALERTS: AlertItem[] = [
     buildingName: 'Parramatta Riverfront Residences',
     timestamp: 'Today, 08:42 AM',
     severity: 'High',
-    description: 'Computer-vision analysis identified a hairline diagonal crack spanning column interface level 14.',
+    description: 'Preloaded demo alert for a sample diagonal crack observation. No image analysis was performed.',
     recommendation: 'Arrange a certified structural engineering inspection within 14 business days.',
-    read: false
+    read: false,
+    buildingId: 'bld-002',
+    scanId: 'scn-001',
+    source: 'demo'
   },
   {
     id: 'alt-2',
@@ -133,9 +292,12 @@ const INITIAL_ALERTS: AlertItem[] = [
     buildingName: 'Barangaroo Commercial Tower 4',
     timestamp: 'Yesterday, 04:15 PM',
     severity: 'Moderate',
-    description: 'Subsurface wall scanner detected localized efflorescence and minor concrete spalling.',
+    description: 'Preloaded demo alert for a sample moisture and efflorescence observation.',
     recommendation: 'Log in Building Memory and compare with previous quarter waterproofing scan.',
-    read: false
+    read: false,
+    buildingId: 'bld-001',
+    scanId: 'scn-002',
+    source: 'demo'
   },
   {
     id: 'alt-3',
@@ -144,8 +306,10 @@ const INITIAL_ALERTS: AlertItem[] = [
     timestamp: '02 November 2026',
     severity: 'Low',
     description: 'Routine compliance window open for annual AS 4349 property condition evaluation.',
-    recommendation: 'Initiate new multi-component AI scan via ARCHONIX workspace.',
-    read: true
+    recommendation: 'Schedule a routine inspection and record findings in the workspace.',
+    read: true,
+    buildingId: 'bld-003',
+    source: 'demo'
   }
 ];
 
@@ -165,7 +329,8 @@ const INITIAL_SCANS: ScanRecord[] = [
       'Surface rust staining indicating internal rebar oxidation.',
       'Localized compressive stress indicators detected near floor junction.'
     ],
-    summary: 'Preliminary computer vision telemetry classifies this observation under High Concern. Recommended immediate professional engineering review in accordance with Australian Standards.'
+    summary: 'Preloaded demo record. The observations and measurements are illustrative only and are not an engineering assessment.',
+    source: 'demo'
   },
   {
     id: 'scn-002',
@@ -182,170 +347,175 @@ const INITIAL_SCANS: ScanRecord[] = [
       'Structural core remains unaffected.',
       'No evidence of progressive widening compared to baseline scan.'
     ],
-    summary: 'Observation consistent with normal thermal movement and drying shrinkage. Low structural risk profile.'
+    summary: 'Preloaded demo record. The observations and measurements are illustrative only and are not an engineering assessment.',
+    source: 'demo'
   }
 ];
 
-// --- INTERACTIVE MAP COMPONENT ---
-function IncidentMap({ buildings, onSelectBuilding }: { buildings: Building[], onSelectBuilding: (id: string) => void }) {
-  const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapInstanceRef = useRef<L.Map | null>(null);
-  const [activeAsset, setActiveAsset] = useState<Building>(buildings[1] || buildings[0]);
-
-  useEffect(() => {
-    if (!mapContainerRef.current) return;
-
-    if (!mapInstanceRef.current) {
-      const map = L.map(mapContainerRef.current).setView([-33.845, 151.09], 11);
-
-      // Dark CartoDB Positron/DarkMatter tiles matching Midnight Black UI
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-        subdomains: 'abcd',
-        maxZoom: 19
-      }).addTo(map);
-
-      mapInstanceRef.current = map;
-    }
-
-    const map = mapInstanceRef.current;
-
-    // Clear existing markers before re-rendering
-    map.eachLayer((layer) => {
-      if (layer instanceof L.CircleMarker) {
-        map.removeLayer(layer);
-      }
-    });
-
-    buildings.forEach((bld) => {
-      const isHighRisk = bld.status === 'Inspection Recommended' || bld.status === 'Urgent Assessment';
-      const isModerate = bld.status === 'Monitoring Required';
-
-      const pinColor = isHighRisk ? '#EF4444' : isModerate ? '#F59E0B' : '#10B981';
-
-      const marker = L.circleMarker([bld.lat, bld.lng], {
-        radius: isHighRisk ? 12 : 9,
-        fillColor: pinColor,
-        color: '#E5C77B',
-        weight: 2,
-        opacity: 1,
-        fillOpacity: 0.85
-      }).addTo(map);
-
-      marker.bindPopup(`
-        <div style="background:#191919; color:#F5F0E5; padding:8px; border-radius:6px; font-family:sans-serif; min-width:200px;">
-          <div style="font-size:10px; color:#E5C77B; font-family:monospace; text-transform:uppercase;">${bld.type} • ${bld.status}</div>
-          <div style="font-weight:bold; font-size:13px; margin:4px 0;">${bld.name}</div>
-          <div style="font-size:11px; color:#A7A39A; margin-bottom:6px;">${bld.incidentNote || 'No critical anomalies logged.'}</div>
-          <div style="font-size:11px; font-family:monospace; color:#E5C77B;">Health Index: ${bld.healthIndex}%</div>
-        </div>
-      `);
-
-      marker.on('click', () => {
-        setActiveAsset(bld);
-      });
-    });
-
-    return () => {};
-  }, [buildings]);
-
-  const flyToBuilding = (bld: Building) => {
-    setActiveAsset(bld);
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo([bld.lat, bld.lng], 14, { duration: 1.2 });
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Geospatial Incident & Telemetry Map</h1>
-          <p className="text-sm text-[#A7A39A]">Pinpoint recorded structural anomalies, crack detections, and sensor telemetry across NSW.</p>
-        </div>
-        <div className="flex items-center gap-4 text-xs font-mono bg-[#191919] px-4 py-2 rounded border border-[#222222]">
-          <span className="flex items-center gap-1.5 text-red-400"><span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping"></span> Incident Recorded</span>
-          <span className="flex items-center gap-1.5 text-amber-400"><span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Monitoring</span>
-          <span className="flex items-center gap-1.5 text-emerald-400"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Optimal</span>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Map Canvas */}
-        <div className="lg:col-span-2 bg-[#191919] border border-[#222222] rounded overflow-hidden relative h-[520px]">
-          <div ref={mapContainerRef} className="w-full h-full z-10" />
-        </div>
-
-        {/* Selected Incident Inspector Panel */}
-        <div className="p-6 bg-[#191919] border border-[#222222] rounded flex flex-col justify-between space-y-6">
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-mono uppercase text-[#E5C77B]">Selected Site Telemetry</span>
-              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                activeAsset.status === 'Inspection Recommended' || activeAsset.status === 'Urgent Assessment'
-                  ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                  : activeAsset.status === 'Monitoring Required'
-                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-              }`}>
-                {activeAsset.status}
-              </span>
-            </div>
-
-            <div className="h-40 rounded overflow-hidden mb-4 border border-[#222222]">
-              <img src={activeAsset.imageUrl} alt={activeAsset.name} className="w-full h-full object-cover" />
-            </div>
-
-            <h3 className="text-lg font-bold text-[#F5F0E5]">{activeAsset.name}</h3>
-            <p className="text-xs text-[#A7A39A] font-mono mb-4">{activeAsset.location} ({activeAsset.lat.toFixed(4)}, {activeAsset.lng.toFixed(4)})</p>
-
-            <div className="p-3 bg-[#090909] border border-[#222222] rounded mb-4">
-              <div className="text-[10px] font-mono uppercase text-[#E5C77B] mb-1">Recorded Incident Log</div>
-              <p className="text-xs text-[#F5F0E5] leading-relaxed">{activeAsset.incidentNote || 'Routine structural telemetry active. No critical incidents logged.'}</p>
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-[10px] font-mono uppercase text-[#A7A39A]">Quick Jump to Monitored Sites</div>
-              {buildings.map((b) => (
-                <button
-                  key={b.id}
-                  onClick={() => flyToBuilding(b)}
-                  className={`w-full text-left px-3 py-2 rounded text-xs flex items-center justify-between transition-colors ${
-                    activeAsset.id === b.id ? 'bg-[#B58B3B]/20 text-[#E5C77B] border border-[#B58B3B]/40' : 'bg-[#222222]/50 text-[#A7A39A] hover:text-[#F5F0E5]'
-                  }`}
-                >
-                  <span className="truncate">{b.name}</span>
-                  <MapPin className="w-3.5 h-3.5 shrink-0" />
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <button
-            onClick={() => onSelectBuilding(activeAsset.id)}
-            className="w-full py-2.5 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center justify-center gap-2"
-          >
-            <Cpu className="w-4 h-4" />
-            <span>Inspect Site in AI Scanner</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+function formatRecordDate(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
+
+function currentLocalDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function makeLocalId(prefix: string) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function currentTimestamp() {
+  return new Date().toISOString();
+}
+
+function dateAfterDays(days: number) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function persistJson(key: string, value: unknown): string | null {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: null } }));
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown browser storage error';
+    console.error(`Could not persist ${key}:`, message);
+    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: message } }));
+    return message;
+  }
+}
+
+function reportStorageError(key: string, error: string) {
+  console.error(`Could not read ${key}:`, error);
+  window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error } }));
+}
+
+function workspaceStorageKey(key: string, scope: string) {
+  return scope === 'demo' ? key : `${key}_${scope}`;
+}
+
+function readWorkspaceJson<T>(key: string, scope: string, fallback: T): T {
+  const saved = localStorage.getItem(workspaceStorageKey(key, scope));
+  return saved ? JSON.parse(saved) as T : fallback;
+}
+
+function statusForConcern(concern: ScanRecord['concernLevel']): Building['status'] {
+  if (concern === 'Urgent Professional Assessment') return 'Urgent Assessment';
+  if (concern === 'High Concern') return 'Inspection Recommended';
+  if (concern === 'Moderate Concern') return 'Monitoring Required';
+  return 'Low Concern';
+}
+
+const DEFAULT_NEW_BUILDING = {
+  name: '',
+  location: '',
+  lat: -33.8688,
+  lng: 151.2093,
+  type: 'Commercial' as Building['type'],
+  year: 2022,
+  floors: 10,
+  description: '',
+  incidentNote: '',
+  imageUrl: 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80'
+};
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<Screen>('login');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isDemoSession, setIsDemoSession] = useState<boolean>(false);
+  const isDemoSessionRef = useRef(false);
+  const [authLoading, setAuthLoading] = useState<boolean>(Boolean(supabase));
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const [passwordConfirmInput, setPasswordConfirmInput] = useState('');
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [todayDate, setTodayDate] = useState(currentLocalDate);
+  const [reportGeneratedDate] = useState(() => new Date().toLocaleDateString());
+  const [currentUser, setCurrentUser] = useState<{ id: string; email: string; name: string; role: UserRole } | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const workspaceStorageScope = isDemoSession ? 'demo' : userId ? `user-${userId}` : null;
+  const [dataScopeLoaded, setDataScopeLoaded] = useState<string | null>(null);
+  const [organizationId, setOrganizationId] = useState<string | null>(null);
+  const [organizationName, setOrganizationName] = useState('');
+  const [organizationLoading, setOrganizationLoading] = useState(false);
+  const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [organizationNameInput, setOrganizationNameInput] = useState('');
+  const [invitationTokenInput, setInvitationTokenInput] = useState('');
+  const [organizationSubmitting, setOrganizationSubmitting] = useState(false);
   const [userEmail, setUserEmail] = useState<string>('lachlan.ross@archonix.com.au');
+  const [fullNameInput, setFullNameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [newAccountEmail, setNewAccountEmail] = useState('');
+  const [emailUpdateNotice, setEmailUpdateNotice] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<Exclude<UserRole, 'administrator'>>('viewer');
+  const [generatedInvite, setGeneratedInvite] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteBusy, setInviteBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
+  const { buildings: supabaseBuildings, loading: buildingsLoading, error: buildingsError } = useSupabaseBuildings();
 
   const [buildings, setBuildings] = useState<Building[]>(() => {
     const saved = localStorage.getItem('archonix_buildings_au_v2');
     return saved ? JSON.parse(saved) : INITIAL_BUILDINGS;
   });
+
+  const activeBuildings = useMemo(() => {
+    if (supabaseBuildings.length === 0) {
+      if (isDemoSession && buildings.length === 0) return INITIAL_BUILDINGS;
+      return buildings;
+    }
+
+    const remoteIds = new Set(supabaseBuildings.map(building => building.id));
+    const localAdditions = buildings.filter(building =>
+      !INITIAL_BUILDINGS.some(initial => initial.id === building.id) && !remoteIds.has(building.id)
+    );
+
+    const remoteBuildings: Building[] = supabaseBuildings.map(profile => {
+      const local = buildings.find(building => building.id === profile.id);
+      const classification = profile.building_classification.toLowerCase();
+      const type: Building['type'] = classification.includes('residential')
+        ? 'Residential'
+        : classification.includes('industrial')
+          ? 'Industrial'
+          : classification.includes('institutional') || classification.includes('education') || classification.includes('health')
+            ? 'Institutional'
+            : classification.includes('commercial')
+              ? 'Commercial'
+              : 'Other';
+      const status: Building['status'] = profile.monitoring_status === 'attention_required'
+        ? 'Inspection Recommended'
+        : profile.monitoring_status === 'overdue'
+          ? 'Urgent Assessment'
+          : profile.monitoring_status === 'archived'
+            ? 'Monitoring Required'
+            : 'Low Concern';
+
+      return {
+        id: profile.id,
+        name: profile.name,
+        location: [profile.street_address, profile.suburb, profile.state, profile.postcode].filter(Boolean).join(', '),
+        lat: profile.latitude,
+        lng: profile.longitude,
+        type,
+        year: profile.construction_year,
+        floors: profile.floors_above_ground,
+        description: profile.description,
+        status: local?.status || status,
+        healthIndex: local?.healthIndex,
+        lastScanDate: local?.lastScanDate || 'Not scanned',
+        imageUrl: local?.imageUrl || INITIAL_BUILDINGS[0].imageUrl,
+        incidentNote: local?.incidentNote
+      };
+    });
+
+    return [...remoteBuildings, ...localAdditions];
+  }, [buildings, supabaseBuildings, isDemoSession]);
 
   const [alerts, setAlerts] = useState<AlertItem[]>(() => {
     const saved = localStorage.getItem('archonix_alerts_au_v2');
@@ -356,58 +526,681 @@ export default function App() {
     const saved = localStorage.getItem('archonix_scans_au_v2');
     return saved ? JSON.parse(saved) : INITIAL_SCANS;
   });
-
-  const [selectedBuildingId, setSelectedBuildingId] = useState<string>('bld-002');
-  const [activeScanComponent, setActiveScanComponent] = useState<string>('Columns');
-  const [isScanning, setIsScanning] = useState<boolean>(false);
-  const [scanProgress, setScanProgress] = useState<number>(0);
-  const [currentScanResult, setCurrentScanResult] = useState<ScanRecord | null>(scans[0]);
-  const [showBoundingBoxes, setShowBoundingBoxes] = useState<boolean>(true);
-
-  const [newBuilding, setNewBuilding] = useState({
-    name: '',
-    location: '',
-    lat: -33.8688,
-    lng: 151.2093,
-    type: 'Commercial' as Building['type'],
-    year: 2022,
-    floors: 10,
-    description: '',
-    incidentNote: '',
-    imageUrl: 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80'
+  const [workOrders, setWorkOrders] = useState<WorkOrder[]>(() => {
+    const saved = localStorage.getItem('archonix_work_orders_au_v1');
+    return saved ? JSON.parse(saved) : [];
   });
 
-  useEffect(() => {
-    localStorage.setItem('archonix_buildings_au_v2', JSON.stringify(buildings));
-  }, [buildings]);
+  const [selectedBuildingId, setSelectedBuildingId] = useState<string>('bld-002');
+  const activeSelectedBuildingId = activeBuildings.some(building => building.id === selectedBuildingId)
+    ? selectedBuildingId
+    : activeBuildings[0]?.id || '';
+  const [activeScanComponent, setActiveScanComponent] = useState<string>('Columns');
+  const [currentScanResult, setCurrentScanResult] = useState<ScanRecord | null>(scans[0]);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [scanConcern, setScanConcern] = useState<ScanRecord['concernLevel']>('Low Concern');
+  const [scanCrackLength, setScanCrackLength] = useState('');
+  const [scanCrackWidth, setScanCrackWidth] = useState('');
+  const [scanNotes, setScanNotes] = useState('');
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
+  const [buildingSearch, setBuildingSearch] = useState('');
+  const [buildingTypeFilter, setBuildingTypeFilter] = useState('All types');
+  const [buildingStatusFilter, setBuildingStatusFilter] = useState('All statuses');
+  const [buildingSort, setBuildingSort] = useState('Name (A–Z)');
+  const [alertSeverityFilter, setAlertSeverityFilter] = useState('All severities');
+  const [reportBuildingId, setReportBuildingId] = useState('');
+  const [workOrderBuildingId, setWorkOrderBuildingId] = useState('');
+  const [workOrderTitle, setWorkOrderTitle] = useState('');
+  const [workOrderDescription, setWorkOrderDescription] = useState('');
+  const [workOrderAssignee, setWorkOrderAssignee] = useState('');
+  const [workOrderDueDate, setWorkOrderDueDate] = useState('');
+  const [workOrderError, setWorkOrderError] = useState<string | null>(null);
+  const [checklistTemplates, setChecklistTemplates] = useState<ChecklistTemplate[]>(() => {
+    const saved = localStorage.getItem('archonix_checklist_templates_v1');
+    return saved ? JSON.parse(saved) as ChecklistTemplate[] : [DEFAULT_CHECKLIST];
+  });
+  const [selectedChecklistId, setSelectedChecklistId] = useState(DEFAULT_CHECKLIST.id);
+  const [checklistResponses, setChecklistResponses] = useState<Record<string, boolean>>({});
+  const [checklistNameInput, setChecklistNameInput] = useState('');
+  const [checklistComponentInput, setChecklistComponentInput] = useState('All');
+  const [checklistItemsInput, setChecklistItemsInput] = useState('');
+  const [checklistError, setChecklistError] = useState<string | null>(null);
+  const [auditLog, setAuditLog] = useState<AuditEvent[]>(() => {
+    const saved = localStorage.getItem('archonix_audit_log_v1');
+    return saved ? JSON.parse(saved) as AuditEvent[] : [];
+  });
+  const [reviewNote, setReviewNote] = useState('');
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [buildingCsvPreview, setBuildingCsvPreview] = useState<CsvImportRow[]>([]);
+  const [buildingCsvErrors, setBuildingCsvErrors] = useState<string[]>([]);
+  const [buildingCsvName, setBuildingCsvName] = useState('');
+  const [browserNotificationPermission, setBrowserNotificationPermission] = useState<NotificationPermission | 'unsupported'>(() =>
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
+  );
+  const availableChecklistTemplates = checklistTemplates.filter(template =>
+    template.component === 'All' || template.component === activeScanComponent
+  );
+  const selectedChecklist = availableChecklistTemplates.find(template => template.id === selectedChecklistId)
+    || availableChecklistTemplates[0];
+
+  const [newBuilding, setNewBuilding] = useState(DEFAULT_NEW_BUILDING);
 
   useEffect(() => {
-    localStorage.setItem('archonix_alerts_au_v2', JSON.stringify(alerts));
-  }, [alerts]);
+    const handleStorageResult = (event: Event) => {
+      const { key, error } = (event as CustomEvent<{ key: string; error: string | null }>).detail;
+      setStorageError(current => error ? `${key}: ${error}` : current?.startsWith(`${key}:`) ? null : current);
+    };
+    window.addEventListener('archonix:storage', handleStorageResult);
+    return () => window.removeEventListener('archonix:storage', handleStorageResult);
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem('archonix_scans_au_v2', JSON.stringify(scans));
-  }, [scans]);
+    const timer = window.setInterval(() => setTodayDate(currentLocalDate()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
+  useEffect(() => {
+    const scope = workspaceStorageScope;
+    if (!scope || dataScopeLoaded === scope) return;
+    const timer = window.setTimeout(() => {
+      const demoScope = scope === 'demo';
+      const savedChecklists = readWorkspaceJson<ChecklistTemplate[]>(
+        'archonix_checklist_templates_v1',
+        scope,
+        [DEFAULT_CHECKLIST]
+      );
+      const loadedChecklists = savedChecklists.length > 0 ? savedChecklists : [DEFAULT_CHECKLIST];
+      setBuildings(readWorkspaceJson('archonix_buildings_au_v2', scope, demoScope ? INITIAL_BUILDINGS : []));
+      setAlerts(readWorkspaceJson('archonix_alerts_au_v2', scope, demoScope ? INITIAL_ALERTS : []));
+      setScans(readWorkspaceJson('archonix_scans_au_v2', scope, demoScope ? INITIAL_SCANS : []));
+      setWorkOrders(readWorkspaceJson('archonix_work_orders_au_v1', scope, []));
+      setChecklistTemplates(loadedChecklists);
+      setSelectedChecklistId(loadedChecklists[0].id);
+      setAuditLog(readWorkspaceJson('archonix_audit_log_v1', scope, []));
+      setCurrentScanResult(demoScope ? INITIAL_SCANS[0] : null);
+      setEditingRecordId(null);
+      setSelectedBuildingId(demoScope ? 'bld-002' : '');
+      setActiveScanComponent('Columns');
+      setScanConcern('Low Concern');
+      setScanCrackLength('');
+      setScanCrackWidth('');
+      setChecklistResponses({});
+      setNewBuilding(DEFAULT_NEW_BUILDING);
+      setUploadedImageUrl(null);
+      setUploadedFileName(null);
+      setScanNotes('');
+      setScanError(null);
+      setReviewNote('');
+      setReviewError(null);
+      setWorkOrderBuildingId('');
+      setWorkOrderTitle('');
+      setWorkOrderDescription('');
+      setWorkOrderAssignee('');
+      setWorkOrderDueDate('');
+      setWorkOrderError(null);
+      setBuildingCsvPreview([]);
+      setBuildingCsvErrors([]);
+      setBuildingCsvName('');
+      setGeneratedInvite(null);
+      setInviteEmail('');
+      setInviteError(null);
+      setDataScopeLoaded(scope);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_buildings_au_v2', workspaceStorageScope), buildings);
+    }
+  }, [buildings, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_alerts_au_v2', workspaceStorageScope), alerts);
+    }
+  }, [alerts, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_scans_au_v2', workspaceStorageScope), scans);
+    }
+  }, [scans, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_work_orders_au_v1', workspaceStorageScope), workOrders);
+    }
+  }, [workOrders, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_checklist_templates_v1', workspaceStorageScope), checklistTemplates);
+    }
+  }, [checklistTemplates, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (workspaceStorageScope && dataScopeLoaded === workspaceStorageScope) {
+      persistJson(workspaceStorageKey('archonix_audit_log_v1', workspaceStorageScope), auditLog);
+    }
+  }, [auditLog, workspaceStorageScope, dataScopeLoaded]);
+
+  useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    let active = true;
+    const applySession = (session: Session | null, event?: AuthChangeEvent) => {
+      if (!active) return;
+      if (!session) {
+        if (!isDemoSessionRef.current) {
+          setCurrentUser(null);
+          setUserId(null);
+          setOrganizationId(null);
+          setOrganizationName('');
+          setIsAuthenticated(false);
+          setOrganizationLoading(false);
+          setOrganizationError(null);
+        }
+        return;
+      }
+
+      setCurrentUser({
+        id: session.user.id,
+        email: session.user.email || '',
+        name: session.user.user_metadata.full_name || session.user.email || 'Team member',
+        role: 'viewer'
+      });
+      setUserId(session.user.id);
+      setOrganizationLoading(true);
+      setOrganizationError(null);
+      isDemoSessionRef.current = false;
+      setIsDemoSession(false);
+      setIsAuthenticated(true);
+      setIsPasswordRecovery(event === 'PASSWORD_RECOVERY');
+      setCurrentScreen(event === 'PASSWORD_RECOVERY' ? 'password-reset' : 'onboarding');
+    };
+
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (error) setAuthError(error.message);
+      applySession(data.session, 'INITIAL_SESSION');
+      if (active) setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      applySession(session, event);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !userId || isDemoSession || isPasswordRecovery) return;
+    let active = true;
+
+    void readOrganizationMembership(userId).then(membership => {
+      if (!active) return;
+      if (!membership) {
+        setOrganizationId(null);
+        setOrganizationName('');
+        setOrganizationLoading(false);
+        setCurrentScreen('onboarding');
+        return;
+      }
+
+      setOrganizationId(membership.id);
+      setOrganizationName(membership.name);
+      setCurrentUser(current => current ? { ...current, role: membership.role } : current);
+      setOrganizationLoading(false);
+      setCurrentScreen('dashboard');
+    }).catch(error => {
+      if (!active) return;
+      setOrganizationError(error instanceof Error ? error.message : 'Could not load organization membership.');
+      setOrganizationLoading(false);
+      setCurrentScreen('onboarding');
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [userId, isDemoSession, isPasswordRecovery]);
+
+  const canEdit = isDemoSession || currentUser?.role === 'administrator'
+    || currentUser?.role === 'structural_engineer' || currentUser?.role === 'inspector';
+  const canManageBuildings = isDemoSession || currentUser?.role === 'administrator';
+  const canReview = isDemoSession || currentUser?.role === 'administrator'
+    || currentUser?.role === 'structural_engineer';
+
+  const recordAudit = (action: string, entity: string, entityId: string, details: string) => {
+    const event: AuditEvent = {
+      id: makeLocalId('audit'),
+      action,
+      entity,
+      entityId,
+      actor: currentUser?.email || 'Demo workspace',
+      timestamp: currentTimestamp(),
+      details
+    };
+    setAuditLog(current => [event, ...current].slice(0, 500));
+  };
+
+  const handleOrganizationSetup = async (event: React.FormEvent, mode: 'create' | 'join') => {
+    event.preventDefault();
+    if (!supabase || !userId) {
+      setOrganizationError('Sign in to create or join an organization.');
+      return;
+    }
+
+    setOrganizationSubmitting(true);
+    setOrganizationError(null);
+    try {
+      if (mode === 'create') {
+        const name = organizationNameInput.trim();
+        if (name.length < 2 || name.length > 120) {
+          throw new Error('Organization name must be between 2 and 120 characters.');
+        }
+        const { error } = await supabase.rpc('create_organization', { organization_name: name });
+        if (error) throw error;
+      } else {
+        const token = invitationTokenInput.trim();
+        if (!token) throw new Error('Enter the invitation token supplied by your organization administrator.');
+        const { error } = await supabase.rpc('join_organization', { invitation_token: token });
+        if (error) throw error;
+      }
+
+      const membership = await readOrganizationMembership(userId);
+      if (!membership) throw new Error('The organization action completed, but membership could not be loaded. Sign out and sign in again.');
+      setOrganizationId(membership.id);
+      setOrganizationName(membership.name);
+      setCurrentUser(current => current ? { ...current, role: membership.role } : current);
+      recordAudit(mode === 'create' ? 'Created organization' : 'Joined organization', 'Organization', membership.id, membership.name);
+      setCurrentScreen('dashboard');
+    } catch (error) {
+      setOrganizationError(error instanceof Error ? error.message : 'Organization setup failed.');
+    } finally {
+      setOrganizationSubmitting(false);
+    }
+  };
+
+  const handlePasswordResetRequest = async () => {
+    setAuthError(null);
+    setAuthNotice(null);
+    if (!supabase) {
+      setAuthError('Password recovery is unavailable because Supabase is not configured.');
+      return;
+    }
+    if (!userEmail.trim()) {
+      setAuthError('Enter your account email first.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(userEmail.trim(), {
+        redirectTo: window.location.origin
+      });
+      if (error) throw error;
+      setAuthNotice('If an account exists for that email, a password reset link has been sent.');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not request a password reset.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    setAuthError(null);
+    setAuthNotice(null);
+    if (!supabase) {
+      setAuthError('Email confirmation is unavailable because Supabase is not configured.');
+      return;
+    }
+    if (!userEmail.trim()) {
+      setAuthError('Enter the email address you used to sign up first.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: userEmail.trim(),
+        options: { emailRedirectTo: window.location.origin }
+      });
+      if (error) throw error;
+      setAuthNotice('If that address has a pending confirmation, a new link has been sent.');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not resend the confirmation email.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePasswordUpdate = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAuthError(null);
+    if (passwordInput.length < 8) {
+      setAuthError('Use a password with at least 8 characters.');
+      return;
+    }
+    if (passwordInput !== passwordConfirmInput) {
+      setAuthError('The passwords do not match.');
+      return;
+    }
+    if (!supabase) {
+      setAuthError('Password updates are unavailable because Supabase is not configured.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: passwordInput });
+      if (error) throw error;
+      setPasswordInput('');
+      setPasswordConfirmInput('');
+      setIsPasswordRecovery(false);
+      setAuthNotice('Password updated successfully.');
+      setCurrentScreen(organizationId ? 'dashboard' : 'onboarding');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not update your password.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleEmailUpdate = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setEmailUpdateNotice(null);
+    if (!supabase || !newAccountEmail.trim()) return;
+    try {
+      const { error } = await supabase.auth.updateUser({ email: newAccountEmail.trim() });
+      if (error) throw error;
+      setEmailUpdateNotice('Check your email to confirm the address change. Your account email updates after confirmation.');
+      setNewAccountEmail('');
+      recordAudit('Requested email change', 'Account', currentUser?.id || '', 'Email change confirmation requested.');
+    } catch (error) {
+      setEmailUpdateNotice(error instanceof Error ? error.message : 'Could not update the account email.');
+    }
+  };
+
+  const handleCreateInvite = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setInviteError(null);
+    setGeneratedInvite(null);
+    if (!supabase || currentUser?.role !== 'administrator') {
+      setInviteError('Only organization administrators can invite members.');
+      return;
+    }
+    setInviteBusy(true);
+    try {
+      const { data, error } = await supabase.rpc('create_organization_invite', {
+        p_invited_email: inviteEmail.trim(),
+        p_invited_role: inviteRole
+      });
+      if (error) throw error;
+      if (typeof data !== 'string' || !data) throw new Error('The invitation token was not returned.');
+      setGeneratedInvite(data);
+      recordAudit('Created organization invitation', 'Invitation', inviteEmail.trim(), `Invitation created for role ${inviteRole}.`);
+    } catch (error) {
+      setInviteError(error instanceof Error ? error.message : 'Could not create the organization invitation.');
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const handleAddChecklist = (event: React.FormEvent) => {
+    event.preventDefault();
+    const items = checklistItemsInput.split('\n').map(item => item.trim()).filter(Boolean);
+    if (!checklistNameInput.trim() || items.length === 0) {
+      setChecklistError('Enter a template name and at least one checklist item.');
+      return;
+    }
+    const template: ChecklistTemplate = {
+      id: makeLocalId('checklist'),
+      name: checklistNameInput.trim(),
+      component: checklistComponentInput,
+      items
+    };
+    setChecklistTemplates(current => [...current, template]);
+    setSelectedChecklistId(template.id);
+    setChecklistNameInput('');
+    setChecklistItemsInput('');
+    setChecklistError(null);
+    recordAudit('Created checklist template', 'Checklist template', template.id, template.name);
+  };
+
+  const handleDeleteChecklist = (template: ChecklistTemplate) => {
+    if (checklistTemplates.length <= 1) return;
+    setChecklistTemplates(current => current.filter(item => item.id !== template.id));
+    if (selectedChecklistId === template.id) {
+      setSelectedChecklistId(checklistTemplates.find(item => item.id !== template.id)?.id || DEFAULT_CHECKLIST.id);
+    }
+    recordAudit('Deleted checklist template', 'Checklist template', template.id, template.name);
+  };
+
+  const handleBuildingCsvFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setBuildingCsvName(file.name);
+    setBuildingCsvPreview([]);
+    setBuildingCsvErrors([]);
+
+    try {
+      if (!file.name.toLowerCase().endsWith('.csv')) throw new Error('Choose a file with a .csv extension.');
+      if (file.size > 5 * 1024 * 1024) throw new Error('CSV files must be 5 MB or smaller.');
+      const rows = parseCsv(await file.text());
+      if (rows.length < 2) throw new Error('CSV needs a header row and at least one data row.');
+      if (rows.length > 10_001) throw new Error('CSV imports are limited to 10,000 data rows.');
+      const headers = rows[0].map(header => header.toLowerCase().replace(/[\s_-]+/g, ''));
+      if (new Set(headers).size !== headers.length) throw new Error('CSV contains duplicate column names.');
+      const headerIndex = new Map(headers.map((header, index) => [header, index]));
+      const requiredHeaders = ['name', 'location', 'lat', 'lng'];
+      const missingHeaders = requiredHeaders.filter(header => !headerIndex.has(header));
+      if (missingHeaders.length) throw new Error(`Missing required columns: ${missingHeaders.join(', ')}.`);
+
+      const imported: CsvImportRow[] = [];
+      const errors: string[] = [];
+      const knownBuildings = new Set(activeBuildings.map(building => `${building.name.toLowerCase()}|${building.location.toLowerCase()}`));
+      const getValue = (row: string[], key: string) => row[headerIndex.get(key) ?? -1]?.trim() || '';
+
+      rows.slice(1).forEach((row, index) => {
+        const line = index + 2;
+        const name = getValue(row, 'name');
+        const location = getValue(row, 'location');
+        const latitude = Number(getValue(row, 'lat'));
+        const longitude = Number(getValue(row, 'lng'));
+        const typeText = getValue(row, 'type').toLowerCase();
+        const type = (['residential', 'commercial', 'industrial', 'institutional', 'other'].includes(typeText)
+          ? typeText[0].toUpperCase() + typeText.slice(1)
+          : typeText ? '' : 'Other') as Building['type'];
+        const yearText = getValue(row, 'year');
+        const floorsText = getValue(row, 'floors');
+        const year = yearText ? Number(yearText) : new Date().getFullYear();
+        const floors = floorsText ? Number(floorsText) : 1;
+        const identity = `${name.toLowerCase()}|${location.toLowerCase()}`;
+        const rowErrors: string[] = [];
+
+        if (row.length > headers.length) rowErrors.push('row has more values than the header');
+        if (!name) rowErrors.push('name is required');
+        if (!location) rowErrors.push('location is required');
+        if (!getValue(row, 'lat')) rowErrors.push('lat is required');
+        if (!getValue(row, 'lng')) rowErrors.push('lng is required');
+        if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) rowErrors.push('lat must be between -90 and 90');
+        if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) rowErrors.push('lng must be between -180 and 180');
+        if (typeText && !type) rowErrors.push('type must be Residential, Commercial, Industrial, Institutional, or Other');
+        if (!Number.isInteger(year) || year < 1800 || year > new Date().getFullYear() + 2) rowErrors.push('year is invalid');
+        if (!Number.isInteger(floors) || floors < 1 || floors > 300) rowErrors.push('floors must be between 1 and 300');
+        if (knownBuildings.has(identity)) rowErrors.push('building name and location already exist');
+
+        if (rowErrors.length) {
+          errors.push(`Row ${line}: ${rowErrors.join('; ')}.`);
+          return;
+        }
+        knownBuildings.add(identity);
+        imported.push({
+          line,
+          building: {
+            id: `bld-${crypto.randomUUID()}`,
+            name,
+            location,
+            lat: latitude,
+            lng: longitude,
+            type,
+            year,
+            floors,
+            description: getValue(row, 'description') || 'Imported from CSV.',
+            status: 'Low Concern',
+            lastScanDate: 'Not scanned',
+            imageUrl: INITIAL_BUILDINGS[0].imageUrl
+          }
+        });
+      });
+
+      setBuildingCsvPreview(imported);
+      setBuildingCsvErrors(errors);
+    } catch (error) {
+      setBuildingCsvErrors([error instanceof Error ? error.message : 'Could not parse the CSV file.']);
+    }
+  };
+
+  const importValidBuildings = () => {
+    if (!canManageBuildings || buildingCsvPreview.length === 0) return;
+    const imported = buildingCsvPreview.map(row => row.building);
+    setBuildings(current => [...imported, ...current]);
+    recordAudit('Imported buildings from CSV', 'Building portfolio', buildingCsvName, `${imported.length} valid buildings imported; ${buildingCsvErrors.length} rows skipped.`);
+    setBuildingCsvPreview([]);
+    setBuildingCsvErrors([]);
+    setBuildingCsvName('');
+    setCurrentScreen('buildings');
+  };
+
+  const downloadBuildingCsvTemplate = () => {
+    const csv = 'name,location,lat,lng,type,year,floors,description\r\nExample Building,Sydney NSW 2000,-33.8688,151.2093,Commercial,2020,12,Optional description\r\n';
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'archonix-buildings-template.csv';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const requestBrowserNotifications = async () => {
+    if (typeof Notification === 'undefined') {
+      setBrowserNotificationPermission('unsupported');
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setBrowserNotificationPermission(permission);
+    } catch (error) {
+      setStorageError(error instanceof Error ? `Browser notification permission: ${error.message}` : 'Could not request notification permission.');
+    }
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsAuthenticated(true);
-    setCurrentScreen('dashboard');
+    setAuthError(null);
+    setAuthNotice(null);
+    if (!supabase) {
+      setAuthError('Account access is unavailable because Supabase is not configured. Use the clearly labelled demo workspace instead.');
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      if (isSignUp) {
+        const { data, error } = await supabase.auth.signUp({
+          email: userEmail,
+          password: passwordInput,
+          options: { data: { full_name: fullNameInput.trim() } }
+        });
+        if (error) {
+          setAuthError(error.message);
+          return;
+        }
+        if (!data.session) {
+          setAuthNotice('Account created. Check your email for a confirmation link, then sign in.');
+          setPasswordInput('');
+          setIsSignUp(false);
+          return;
+        }
+
+        const roles: UserRole[] = ['administrator', 'structural_engineer', 'inspector', 'viewer'];
+        const role = data.session.user.app_metadata.role;
+        setCurrentUser({
+          id: data.session.user.id,
+          email: data.session.user.email || userEmail,
+          name: data.session.user.user_metadata.full_name || fullNameInput.trim() || userEmail,
+          role: roles.includes(role) ? role : 'viewer'
+        });
+        setOrganizationLoading(true);
+        setUserId(data.session.user.id);
+        isDemoSessionRef.current = false;
+        setIsDemoSession(false);
+        setIsAuthenticated(true);
+        setCurrentScreen('onboarding');
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: userEmail,
+        password: passwordInput
+      });
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
+      if (!data.session) {
+        setAuthError('Sign-in did not establish an authenticated session. Please try again.');
+        return;
+      }
+
+      const roles: UserRole[] = ['administrator', 'structural_engineer', 'inspector', 'viewer'];
+      const role = data.session.user.app_metadata.role;
+      setCurrentUser({
+        id: data.session.user.id,
+        email: data.session.user.email || userEmail,
+        name: data.session.user.user_metadata.full_name || data.session.user.email || userEmail,
+        role: roles.includes(role) ? role : 'viewer'
+      });
+      setOrganizationLoading(true);
+      setUserId(data.session.user.id);
+      isDemoSessionRef.current = false;
+      setIsDemoSession(false);
+      setIsAuthenticated(true);
+      setCurrentScreen('onboarding');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Account request failed. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleDemoLogin = () => {
     setUserEmail('lachlan.ross@archonix.com.au');
-    setPasswordInput('EnterpriseSecure2026!');
+    setPasswordInput('');
+    isDemoSessionRef.current = true;
+    setCurrentUser({ id: 'demo', email: 'lachlan.ross@archonix.com.au', name: 'Demo Analyst', role: 'administrator' });
+    setUserId(null);
+    setOrganizationId(null);
+    setOrganizationName('');
+    setOrganizationLoading(false);
+    setIsDemoSession(true);
     setIsAuthenticated(true);
     setCurrentScreen('dashboard');
   };
 
   const handleRegisterBuilding = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageBuildings) return;
     if (!newBuilding.name || !newBuilding.location) return;
 
     const created: Building = {
-      id: `bld-${Date.now()}`,
+      id: makeLocalId('bld'),
       name: newBuilding.name,
       location: newBuilding.location,
       lat: Number(newBuilding.lat) || -33.8688,
@@ -424,6 +1217,7 @@ export default function App() {
     };
 
     setBuildings([created, ...buildings]);
+    recordAudit('Registered building', 'Building', created.id, `${created.name} · ${created.location}`);
     setCurrentScreen('map');
     setNewBuilding({
       name: '',
@@ -439,54 +1233,386 @@ export default function App() {
     });
   };
 
-  const startAiScanSimulation = () => {
-    setIsScanning(true);
-    setScanProgress(0);
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 15;
-      if (prog >= 100) {
-        prog = 100;
-        clearInterval(interval);
-        setIsScanning(false);
+  const saveInspectionRecord = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setScanError('Your account role does not allow recording inspections.');
+      return;
+    }
+    const targetBld = activeBuildings.find(building => building.id === activeSelectedBuildingId);
+    if (!targetBld) {
+      setScanError('Select a building before saving an inspection record.');
+      return;
+    }
 
-        const targetBld = buildings.find(b => b.id === selectedBuildingId) || buildings[0];
-        const newRecord: ScanRecord = {
-          id: `scn-${Date.now()}`,
-          buildingId: targetBld.id,
-          buildingName: targetBld.name,
-          component: activeScanComponent,
-          date: 'Today',
-          imageUrl: targetBld.imageUrl,
-          crackLength: `${(Math.random() * 80 + 20).toFixed(1)} mm`,
-          crackWidth: `${(Math.random() * 0.5 + 0.05).toFixed(2)} mm`,
-          concernLevel: Math.random() > 0.5 ? 'Moderate Concern' : 'Low Concern',
-          observations: [
-            `Automated visual inspection of ${activeScanComponent.toLowerCase()} surfaces completed.`,
-            `Surface micro-texture consistency evaluated against baseline parameters.`,
-            `Minor environmental weathering noted along joint interfaces.`
-          ],
-          summary: `AI computer vision scan completed successfully on ${targetBld.name} (${activeScanComponent}). No immediate structural compromise detected; routine monitoring recommended.`
-        };
+    const observations = scanNotes.split('\n').map(note => note.trim()).filter(Boolean);
+    if (observations.length === 0) {
+      setScanError('Add at least one observation before saving this record.');
+      return;
+    }
 
-        setScans([newRecord, ...scans]);
-        setCurrentScanResult(newRecord);
-        setCurrentScreen('diagnosis');
-      } else {
-        setScanProgress(prog);
-      }
-    }, 180);
+    const date = currentTimestamp();
+    const existing = editingRecordId ? scans.find(scan => scan.id === editingRecordId) : undefined;
+    if (editingRecordId && !existing) {
+      setScanError('The inspection record being edited could not be found.');
+      return;
+    }
+    const existingChecklistTemplateAvailable = Boolean(
+      existing?.checklistTemplateId && checklistTemplates.some(template => template.id === existing.checklistTemplateId)
+    );
+    const recordFields = {
+      buildingId: targetBld.id,
+      buildingName: targetBld.name,
+      component: activeScanComponent,
+      imageUrl: uploadedImageUrl || targetBld.imageUrl,
+      crackLength: scanCrackLength ? `${scanCrackLength} mm` : 'Not measured',
+      crackWidth: scanCrackWidth ? `${scanCrackWidth} mm` : 'Not measured',
+      concernLevel: scanConcern,
+      observations,
+      summary: 'Inspector-entered observation. This record is not an automated structural assessment.',
+      source: 'manual' as const,
+      reviewStatus: existing?.reviewStatus || 'Draft' as const,
+      checklist: existing && !existingChecklistTemplateAvailable
+        ? existing.checklist || []
+        : selectedChecklist
+          ? selectedChecklist.items.map(label => ({ label, complete: checklistResponses[label] === true }))
+          : existing?.checklist || [],
+      checklistTemplateId: existing && !existingChecklistTemplateAvailable
+        ? existing.checklistTemplateId
+        : selectedChecklist?.id || existing?.checklistTemplateId,
+      createdBy: existing?.createdBy || currentUser?.email || 'Demo workspace'
+    };
+    const newRecord: ScanRecord = existing
+      ? { ...existing, ...recordFields, date: existing.date, updatedAt: date }
+      : { ...recordFields, id: makeLocalId('scn'), date };
+
+    if (existing) {
+      setScans(current => current.map(scan => scan.id === existing.id ? newRecord : scan));
+      recordAudit('Updated inspection record', 'Inspection', newRecord.id, `${targetBld.name} · ${activeScanComponent}`);
+    } else {
+      setScans(current => [newRecord, ...current]);
+      recordAudit('Created inspection record', 'Inspection', newRecord.id, `${targetBld.name} · ${activeScanComponent}`);
+    }
+    setBuildings(current => current.map(building => building.id === targetBld.id
+      ? {
+          ...building,
+          status: statusForConcern(scanConcern),
+          incidentNote: observations[0],
+          lastScanDate: new Date(date).toLocaleDateString()
+        }
+      : building
+    ));
+    if (!existing && (scanConcern === 'High Concern' || scanConcern === 'Urgent Professional Assessment')) {
+      setAlerts(current => [{
+        id: makeLocalId('alt'),
+        title: `${scanConcern} recorded`,
+        buildingName: targetBld.name,
+        timestamp: new Date(date).toLocaleString(),
+        severity: scanConcern === 'High Concern' ? 'High' : 'Urgent',
+        description: observations[0],
+        recommendation: 'Arrange review by a qualified structural professional.',
+        read: false,
+        buildingId: targetBld.id,
+        scanId: newRecord.id,
+        source: 'manual'
+      }, ...current]);
+    }
+    setCurrentScanResult(newRecord);
+    setScanError(null);
+    setChecklistResponses({});
+    setEditingRecordId(null);
+    setCurrentScreen('diagnosis');
+  };
+
+  const startEditingInspection = (scan: ScanRecord) => {
+    if (!canEdit || scan.source !== 'manual' || !['Draft', 'Changes Requested'].includes(scan.reviewStatus || 'Draft')) return;
+    setEditingRecordId(scan.id);
+    setSelectedBuildingId(scan.buildingId);
+    setActiveScanComponent(scan.component);
+    setScanConcern(scan.concernLevel);
+    const length = Number.parseFloat(scan.crackLength);
+    const width = Number.parseFloat(scan.crackWidth);
+    setScanCrackLength(Number.isFinite(length) ? String(length) : '');
+    setScanCrackWidth(Number.isFinite(width) ? String(width) : '');
+    setScanNotes(scan.observations.join('\n'));
+    setUploadedImageUrl(scan.imageUrl);
+    setUploadedFileName('Current inspection image');
+    const matchingTemplate = checklistTemplates.find(template => template.id === scan.checklistTemplateId);
+    if (matchingTemplate) setSelectedChecklistId(matchingTemplate.id);
+    setChecklistResponses(Object.fromEntries((scan.checklist || []).map(item => [item.label, item.complete])));
+    setScanError(null);
+    setCurrentScreen('scan');
+  };
+
+  const updateInspectionReview = (
+    scan: ScanRecord,
+    nextStatus: NonNullable<ScanRecord['reviewStatus']>,
+    note = ''
+  ) => {
+    const previousStatus = scan.reviewStatus || 'Draft';
+    const isSubmit = nextStatus === 'Submitted'
+      && canEdit
+      && (previousStatus === 'Draft' || previousStatus === 'Changes Requested');
+    const isReviewTransition = canReview && (
+      (nextStatus === 'Under Review' && previousStatus === 'Submitted')
+      || (['Changes Requested', 'Approved'].includes(nextStatus) && previousStatus === 'Under Review')
+      || (nextStatus === 'Closed' && previousStatus === 'Approved')
+    );
+
+    if (scan.source !== 'manual' || (!isSubmit && !isReviewTransition)) {
+      setReviewError('This review transition is not available for your role or the current record status.');
+      return;
+    }
+    if (nextStatus === 'Changes Requested' && !note.trim()) {
+      setReviewError('Add a note explaining what needs to change.');
+      return;
+    }
+
+    const updated: ScanRecord = {
+      ...scan,
+      reviewStatus: nextStatus,
+      reviewerNotes: note.trim()
+        ? [...(scan.reviewerNotes || []), `${currentTimestamp()}: ${note.trim()}`]
+        : scan.reviewerNotes
+    };
+    setScans(current => current.map(item => item.id === scan.id ? updated : item));
+    setCurrentScanResult(current => current?.id === scan.id ? updated : current);
+    recordAudit('Changed inspection review status', 'Inspection', scan.id, `${previousStatus} → ${nextStatus}${note.trim() ? `: ${note.trim()}` : ''}`);
+    setReviewNote('');
+    setReviewError(null);
   };
 
   const resetDemoData = () => {
     setBuildings(INITIAL_BUILDINGS);
     setAlerts(INITIAL_ALERTS);
     setScans(INITIAL_SCANS);
-    localStorage.clear();
-    alert('ARCHONIX Australian Demonstration telemetry reset successfully.');
+    setWorkOrders([]);
+    setCurrentScanResult(INITIAL_SCANS[0] || null);
+    setEditingRecordId(null);
+    setChecklistResponses({});
+    setChecklistTemplates([DEFAULT_CHECKLIST]);
+    setSelectedChecklistId(DEFAULT_CHECKLIST.id);
+    setAuditLog([]);
+    localStorage.removeItem('archonix_buildings_au_v2');
+    localStorage.removeItem('archonix_alerts_au_v2');
+    localStorage.removeItem('archonix_scans_au_v2');
+    localStorage.removeItem('archonix_work_orders_au_v1');
+    localStorage.removeItem('archonix_checklist_templates_v1');
+    localStorage.removeItem('archonix_audit_log_v1');
+    localStorage.removeItem('archonix_notified_task_ids_v1');
   };
 
-  if (!isAuthenticated || currentScreen === 'login') {
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setScanError('Choose a JPG, PNG, or WebP image.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setScanError('Image must be 8 MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        setScanError('Could not read the selected image.');
+        return;
+      }
+      const image = new Image();
+      image.onload = () => {
+        const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(image.width * scale);
+        canvas.height = Math.round(image.height * scale);
+        const context = canvas.getContext('2d');
+        if (!context) {
+          setScanError('Could not prepare the selected image for storage.');
+          return;
+        }
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        setUploadedImageUrl(canvas.toDataURL('image/jpeg', 0.78));
+        setUploadedFileName(file.name);
+        setScanError(null);
+      };
+      image.onerror = () => setScanError('The selected file is not a readable image.');
+      image.src = reader.result;
+    };
+    reader.onerror = () => setScanError('Could not read the selected image.');
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const clearUploadedImage = () => {
+    setUploadedImageUrl(null);
+    setUploadedFileName(null);
+  };
+
+  const createWorkOrder = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setWorkOrderError('Your account role does not allow creating inspection tasks.');
+      return;
+    }
+    const building = activeBuildings.find(item => item.id === workOrderBuildingId);
+    if (!building || !workOrderTitle.trim() || !workOrderDueDate) {
+      setWorkOrderError('Choose a building, enter a task title, and set a due date.');
+      return;
+    }
+    const created: WorkOrder = {
+      id: makeLocalId('task'),
+      buildingId: building.id,
+      title: workOrderTitle.trim(),
+      description: workOrderDescription.trim(),
+      assignedTo: workOrderAssignee.trim() || 'Unassigned',
+      dueDate: workOrderDueDate,
+      status: 'Open',
+      relatedScanId: currentScanResult?.buildingId === building.id ? currentScanResult.id : undefined,
+      createdAt: currentTimestamp()
+    };
+    setWorkOrders(current => [created, ...current]);
+    recordAudit('Created inspection task', 'Task', created.id, `${created.title} · due ${created.dueDate}`);
+    setWorkOrderTitle('');
+    setWorkOrderDescription('');
+    setWorkOrderAssignee('');
+    setWorkOrderDueDate('');
+    setWorkOrderError(null);
+  };
+
+  const updateWorkOrderStatus = (order: WorkOrder, status: WorkOrder['status']) => {
+    if (order.status === status) return;
+    setWorkOrders(current => current.map(item => item.id === order.id ? { ...item, status } : item));
+    recordAudit('Updated inspection task', 'Task', order.id, `${order.status} → ${status}`);
+  };
+
+  const toggleAlertRead = (alertItem: AlertItem) => {
+    setAlerts(current => current.map(item => item.id === alertItem.id ? { ...item, read: !item.read } : item));
+    recordAudit(alertItem.read ? 'Marked alert unread' : 'Marked alert read', 'Alert', alertItem.id, alertItem.title);
+  };
+
+  const scheduleFollowUp = (scan: ScanRecord) => {
+    setWorkOrderBuildingId(scan.buildingId);
+    setWorkOrderTitle(`Follow-up review: ${scan.component}`);
+    setWorkOrderDescription(`Review inspection record ${scan.id}: ${scan.observations.join(' ')}`);
+    setWorkOrderDueDate(dateAfterDays(14));
+    setCurrentScreen('work-orders');
+  };
+
+  const openAlertTarget = (alertItem: AlertItem) => {
+    setAlerts(current => current.map(item => item.id === alertItem.id ? { ...item, read: true } : item));
+    recordAudit('Opened alert', 'Alert', alertItem.id, alertItem.title);
+    if (alertItem.scanId) {
+      const scan = scans.find(item => item.id === alertItem.scanId);
+      if (scan) {
+        setCurrentScanResult(scan);
+        setCurrentScreen('diagnosis');
+        return;
+      }
+    }
+    if (alertItem.buildingId) setSelectedBuildingId(alertItem.buildingId);
+    setCurrentScreen('map');
+  };
+
+  const filteredBuildings = useMemo(() => {
+    const query = buildingSearch.trim().toLowerCase();
+    const matches = activeBuildings.filter(building =>
+      (!query || `${building.name} ${building.location}`.toLowerCase().includes(query))
+      && (buildingTypeFilter === 'All types' || building.type === buildingTypeFilter)
+      && (buildingStatusFilter === 'All statuses' || building.status === buildingStatusFilter)
+    );
+    return matches.sort((left, right) => {
+      if (buildingSort === 'Health (high–low)') return (right.healthIndex ?? -1) - (left.healthIndex ?? -1);
+      if (buildingSort === 'Status') return left.status.localeCompare(right.status);
+      return left.name.localeCompare(right.name);
+    });
+  }, [activeBuildings, buildingSearch, buildingTypeFilter, buildingStatusFilter, buildingSort]);
+  const filteredAlerts = alerts.filter(alertItem =>
+    alertSeverityFilter === 'All severities' || alertItem.severity === alertSeverityFilter
+  );
+  const reportBuilding = activeBuildings.find(building => building.id === reportBuildingId)
+    || activeBuildings.find(building => building.id === activeSelectedBuildingId)
+    || activeBuildings[0];
+  const reportScans = reportBuilding
+    ? scans.filter(scan => scan.buildingId === reportBuilding.id)
+      .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
+    : [];
+  const memoryBuilding = activeBuildings.find(building => building.id === selectedBuildingId) || activeBuildings[0];
+  const memoryScans = memoryBuilding
+    ? scans.filter(scan => scan.buildingId === memoryBuilding.id)
+      .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
+    : [];
+  const memoryLatest = memoryScans[0];
+  const memoryPrevious = memoryLatest
+    ? memoryScans.find(scan => scan.component === memoryLatest.component && scan.id !== memoryLatest.id)
+    : undefined;
+  const memoryComparisonScans = memoryLatest
+    ? memoryScans.filter(scan => scan.component === memoryLatest.component).slice(0, 2)
+    : [];
+  const latestWidth = memoryLatest ? Number.parseFloat(memoryLatest.crackWidth) : Number.NaN;
+  const previousWidth = memoryPrevious ? Number.parseFloat(memoryPrevious.crackWidth) : Number.NaN;
+  const widthChange = Number.isFinite(latestWidth) && Number.isFinite(previousWidth)
+    ? `${latestWidth >= previousWidth ? '+' : ''}${(latestWidth - previousWidth).toFixed(2)} mm`
+    : null;
+  const actionableScans = scans.filter(scan =>
+    scan.concernLevel === 'High Concern' || scan.concernLevel === 'Urgent Professional Assessment'
+  );
+  const openWorkOrders = workOrders.filter(order => order.status !== 'Completed').length;
+  const portfolioHealth = activeBuildings
+    .map(building => building.healthIndex)
+    .filter((value): value is number => value != null);
+  const portfolioHealthAverage = portfolioHealth.length
+    ? `${(portfolioHealth.reduce((sum, value) => sum + value, 0) / portfolioHealth.length).toFixed(1)}%`
+    : 'Not available';
+  const buildingsWithRecords = activeBuildings.filter(building => scans.some(scan => scan.buildingId === building.id)).length;
+  const reviewQueue = scans.filter(scan =>
+    scan.source === 'manual' && (scan.reviewStatus === 'Submitted' || scan.reviewStatus === 'Under Review')
+  );
+  const dueWorkOrders = useMemo(() => workOrders.filter(order =>
+    order.status !== 'Completed' && order.dueDate <= todayDate
+  ), [workOrders, todayDate]);
+
+  useEffect(() => {
+    if (!workspaceStorageScope || dataScopeLoaded !== workspaceStorageScope
+      || browserNotificationPermission !== 'granted' || typeof Notification === 'undefined'
+      || dueWorkOrders.length === 0) return;
+    const storageKey = workspaceStorageKey('archonix_notified_task_ids_v1', workspaceStorageScope);
+    const saved = localStorage.getItem(storageKey);
+    let notifiedIds: string[];
+    try {
+      notifiedIds = saved ? JSON.parse(saved) as string[] : [];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid saved notification state';
+      reportStorageError('Browser task notification history', message);
+      return;
+    }
+
+    const notified = new Set(notifiedIds);
+    const newlyNotified = dueWorkOrders.filter(order => !notified.has(order.id));
+    newlyNotified.forEach(order => {
+      const overdue = order.dueDate < todayDate;
+      try {
+        new Notification(overdue ? 'Inspection task overdue' : 'Inspection task due today', {
+          body: `${order.title} · ${order.dueDate}`,
+          tag: `archonix-${order.id}`
+        });
+        notified.add(order.id);
+      } catch (error) {
+        reportStorageError('Browser notification', error instanceof Error ? error.message : 'Notification could not be displayed.');
+      }
+    });
+    if (newlyNotified.length > 0) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify([...notified]));
+      } catch (error) {
+        reportStorageError(storageKey, error instanceof Error ? error.message : 'Could not save notification history.');
+      }
+    }
+  }, [dueWorkOrders, browserNotificationPermission, todayDate, workspaceStorageScope, dataScopeLoaded]);
+
+  if (!isAuthenticated || currentScreen === 'login' || currentScreen === 'password-reset') {
+    const isResettingPassword = currentScreen === 'password-reset';
     return (
       <div className="min-h-screen bg-[#090909] text-[#F5F0E5] flex flex-col lg:flex-row font-sans selection:bg-[#B58B3B] selection:text-white">
         <div className="lg:w-1/2 relative bg-[#191919] p-12 flex flex-col justify-between border-r border-[#222222] overflow-hidden">
@@ -508,21 +1634,21 @@ export default function App() {
               </span>
             </h1>
             <p className="text-[#A7A39A] text-lg max-w-md leading-relaxed">
-              Advanced computer vision structural intelligence platform designed for Australian property portfolios, engineers, and facility operators.
+              A structural asset workspace for recording inspection evidence, tracking follow-up tasks, and reviewing building history.
             </p>
           </div>
           <div className="relative z-10 mt-12 grid grid-cols-3 gap-6 pt-8 border-t border-[#222222]">
             <div>
-              <div className="text-2xl font-bold font-mono text-[#E5C77B]">0.05mm</div>
-              <div className="text-xs text-[#A7A39A] mt-1">Fissure Resolution</div>
+              <div className="text-2xl font-bold font-mono text-[#E5C77B]">Manual</div>
+              <div className="text-xs text-[#A7A39A] mt-1">Inspection Records</div>
             </div>
             <div>
               <div className="text-2xl font-bold font-mono text-[#E5C77B]">GIS Map</div>
               <div className="text-xs text-[#A7A39A] mt-1">Incident Pinpointing</div>
             </div>
             <div>
-              <div className="text-2xl font-bold font-mono text-[#E5C77B]">AS 4349</div>
-              <div className="text-xs text-[#A7A39A] mt-1">Audit-Ready Reports</div>
+              <div className="text-2xl font-bold font-mono text-[#E5C77B]">PDF</div>
+              <div className="text-xs text-[#A7A39A] mt-1">Print-ready Reports</div>
             </div>
           </div>
           <div className="relative z-10 mt-8 text-xs text-[#A7A39A]">
@@ -533,36 +1659,56 @@ export default function App() {
         <div className="lg:w-1/2 flex items-center justify-center p-8 lg:p-16">
           <div className="w-full max-w-md">
             <div className="mb-8">
-              <h2 className="text-2xl font-bold text-[#F5F0E5] mb-2">Access Command Center</h2>
-              <p className="text-sm text-[#A7A39A]">Sign in to inspect your structural portfolio and Building Memory™ records.</p>
+              <h2 className="text-2xl font-bold text-[#F5F0E5] mb-2">{isResettingPassword ? 'Choose a new password' : isSignUp ? 'Create your account' : 'Access Command Center'}</h2>
+              <p className="text-sm text-[#A7A39A]">{isResettingPassword ? 'Set a new password for your account.' : isSignUp ? 'Create an ARCHONIX account with your work email.' : 'Sign in with your ARCHONIX team account. Demo access is available separately.'}</p>
             </div>
-            <form onSubmit={handleLogin} className="space-y-6">
-              <div>
-                <label className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Work Email *</label>
+            <form onSubmit={isResettingPassword ? handlePasswordUpdate : handleAuthSubmit} className="space-y-6">
+              {isSignUp && !isResettingPassword && (
+                <div>
+                  <label htmlFor="auth-full-name" className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Full Name *</label>
+                  <input
+                    id="auth-full-name"
+                    type="text"
+                    required
+                    autoComplete="name"
+                    value={fullNameInput}
+                    onChange={event => setFullNameInput(event.target.value)}
+                    className="w-full px-4 py-3 bg-[#191919] border border-[#222222] rounded text-[#F5F0E5] placeholder-[#A7A39A] focus:outline-none focus:border-[#B58B3B] transition-colors text-sm"
+                    placeholder="Your name"
+                  />
+                </div>
+              )}
+              {!isResettingPassword && <div>
+                <label htmlFor="auth-email" className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Work Email *</label>
                 <div className="relative">
                   <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[#A7A39A]">
                     <Mail className="w-4 h-4" />
                   </span>
                   <input 
+                    id="auth-email"
                     type="email" 
                     required
+                    autoComplete="email"
                     value={userEmail}
                     onChange={(e) => setUserEmail(e.target.value)}
                     className="w-full pl-10 pr-4 py-3 bg-[#191919] border border-[#222222] rounded text-[#F5F0E5] placeholder-[#A7A39A] focus:outline-none focus:border-[#B58B3B] transition-colors text-sm"
                   />
                 </div>
-              </div>
+              </div>}
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A]">Password *</label>
+                  <label htmlFor="auth-password" className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A]">{isResettingPassword ? 'New password *' : 'Password *'}</label>
                 </div>
                 <div className="relative">
                   <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[#A7A39A]">
                     <Lock className="w-4 h-4" />
                   </span>
                   <input 
+                    id="auth-password"
                     type={showPassword ? "text" : "password"} 
                     required
+                    minLength={8}
+                    autoComplete={isSignUp || isResettingPassword ? 'new-password' : 'current-password'}
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
                     className="w-full pl-10 pr-10 py-3 bg-[#191919] border border-[#222222] rounded text-[#F5F0E5] placeholder-[#A7A39A] focus:outline-none focus:border-[#B58B3B] transition-colors text-sm"
@@ -573,20 +1719,134 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <button type="submit" className="w-full py-3 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold rounded transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#B58B3B]/10">
-                <span>Launch ARCHONIX Workspace</span>
+              {isResettingPassword && (
+                <div>
+                  <label htmlFor="auth-password-confirm" className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Confirm new password *</label>
+                  <input
+                    id="auth-password-confirm"
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                    value={passwordConfirmInput}
+                    onChange={event => setPasswordConfirmInput(event.target.value)}
+                    className="w-full px-4 py-3 bg-[#191919] border border-[#222222] rounded text-[#F5F0E5] text-sm"
+                  />
+                </div>
+              )}
+              <button type="submit" disabled={authLoading || !supabase} className="w-full py-3 bg-[#E5C77B] hover:bg-[#B58B3B] disabled:opacity-50 text-[#090909] font-semibold rounded transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#B58B3B]/10">
+                <span>{authLoading ? 'Please wait…' : isResettingPassword ? 'Update password' : isSignUp ? 'Create account' : 'Sign in'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
-            <div className="mt-8 pt-6 border-t border-[#222222] text-center">
-              <p className="text-xs text-[#A7A39A] mb-3">Preloaded Demo Credentials Ready</p>
+            {authError && <p role="alert" className="mt-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-300">{authError}</p>}
+            {authNotice && <p role="status" className="mt-4 p-3 rounded border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-200">{authNotice}</p>}
+            {!isResettingPassword && <p className="mt-5 text-center text-xs text-[#A7A39A]">
+              {isSignUp ? 'Already have an account?' : 'New to ARCHONIX?'}
+              {' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignUp(!isSignUp);
+                  setAuthError(null);
+                  setAuthNotice(null);
+                }}
+                className="text-[#E5C77B] hover:underline"
+              >
+                {isSignUp ? 'Sign in' : 'Sign up'}
+              </button>
+            </p>}
+            {!isSignUp && !isResettingPassword && (
+              <div className="mt-4 flex flex-wrap justify-center gap-x-4 gap-y-2 text-xs">
+                <button type="button" disabled={authLoading} onClick={() => void handlePasswordResetRequest()} className="text-[#E5C77B] hover:underline disabled:opacity-50">Forgot password?</button>
+                <button type="button" disabled={authLoading} onClick={() => void handleResendConfirmation()} className="text-[#E5C77B] hover:underline disabled:opacity-50">Resend confirmation email</button>
+              </div>
+            )}
+            {isResettingPassword && (
+              <button type="button" onClick={() => {
+                setIsPasswordRecovery(false);
+                setCurrentScreen('dashboard');
+                setAuthError(null);
+                setAuthNotice(null);
+              }} className="mt-5 w-full text-center text-xs text-[#E5C77B] hover:underline">Cancel password update</button>
+            )}
+            {!supabase && (
+              <p className="mt-4 text-xs text-[#A7A39A]">
+                Production sign-in is unavailable until Supabase credentials are configured.
+              </p>
+            )}
+            {!isResettingPassword && <div className="mt-8 pt-6 border-t border-[#222222] text-center">
+              <p className="text-xs text-[#A7A39A] mb-3">Local demo workspace — data is stored in this browser</p>
               <button onClick={handleDemoLogin} className="px-4 py-2 bg-[#191919] hover:bg-[#222222] border border-[#222222] rounded text-xs text-[#E5C77B] font-mono transition-colors inline-flex items-center gap-2">
                 <Zap className="w-3.5 h-3.5 text-[#B58B3B]" />
-                <span>One-Click Demo Entry</span>
+                <span>Enter Demo Workspace</span>
               </button>
-            </div>
+            </div>}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (isAuthenticated && !isDemoSession && !organizationId) {
+    return (
+      <div className="min-h-screen bg-[#090909] text-[#F5F0E5] flex items-center justify-center p-6">
+        <div className="w-full max-w-3xl space-y-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-mono tracking-widest text-[#B58B3B]">ARCHONIX ORGANIZATION SETUP</p>
+              <h1 className="mt-2 text-2xl font-bold">Set up your workspace</h1>
+              <p className="mt-2 text-sm text-[#A7A39A]">Signed in as {currentUser?.email}. Create an organization or accept an invitation.</p>
+            </div>
+            <button onClick={() => {
+              if (supabase) void supabase.auth.signOut();
+              setIsAuthenticated(false);
+              setCurrentUser(null);
+              setUserId(null);
+              setOrganizationId(null);
+              setOrganizationName('');
+              setOrganizationLoading(false);
+              setCurrentScreen('login');
+            }} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-xs text-[#A7A39A]">Sign out</button>
+          </div>
+
+          {organizationLoading && <p role="status" className="p-3 bg-[#191919] border border-[#222222] rounded text-xs text-[#A7A39A]">Checking organization membership…</p>}
+          {organizationError && (
+            <div role="alert" className="p-4 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200 space-y-2">
+              <p>{organizationError}</p>
+              <p>Ensure the organization onboarding migration in <code>supabase/migrations</code> has been applied to this Supabase project.</p>
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 gap-5">
+            <form onSubmit={event => void handleOrganizationSetup(event, 'create')} className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+              <div className="flex items-center gap-2 text-[#E5C77B]"><Users className="w-4 h-4" /><h2 className="font-bold text-sm">Create an organization</h2></div>
+              <p className="text-xs text-[#A7A39A]">You will become its administrator. You can invite members from Settings.</p>
+              <label className="block text-xs text-[#A7A39A]">Organization name
+                <input required minLength={2} maxLength={120} value={organizationNameInput} onChange={event => setOrganizationNameInput(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#333] rounded text-sm text-[#F5F0E5]" placeholder="Company or team name" />
+              </label>
+              <button type="submit" disabled={organizationSubmitting || organizationLoading} className="w-full py-2.5 bg-[#E5C77B] disabled:opacity-50 text-[#090909] font-semibold text-xs rounded">{organizationSubmitting ? 'Creating…' : 'Create organization'}</button>
+            </form>
+
+            <form onSubmit={event => void handleOrganizationSetup(event, 'join')} className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+              <div className="flex items-center gap-2 text-[#E5C77B]"><Mail className="w-4 h-4" /><h2 className="font-bold text-sm">Join by invitation</h2></div>
+              <p className="text-xs text-[#A7A39A]">Use the one-time token provided by your organization administrator. The invitation must match your signed-in email.</p>
+              <label className="block text-xs text-[#A7A39A]">Invitation token
+                <input required value={invitationTokenInput} onChange={event => setInvitationTokenInput(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#333] rounded text-sm text-[#F5F0E5] font-mono" placeholder="Paste invitation token" />
+              </label>
+              <button type="submit" disabled={organizationSubmitting || organizationLoading} className="w-full py-2.5 bg-[#222222] border border-[#B58B3B]/40 disabled:opacity-50 text-[#E5C77B] font-semibold text-xs rounded">{organizationSubmitting ? 'Joining…' : 'Join organization'}</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAuthenticated && workspaceStorageScope && dataScopeLoaded !== workspaceStorageScope
+    && (isDemoSession || organizationId)) {
+    return (
+      <div className="min-h-screen bg-[#090909] text-[#A7A39A] flex items-center justify-center text-sm" role="status">
+        {isDemoSession ? 'Loading the local demo workspace…' : 'Loading your organization workspace…'}
       </div>
     );
   }
@@ -596,13 +1856,24 @@ export default function App() {
     { id: 'map', label: 'Incident & Asset Map', icon: MapPin },
     { id: 'buildings', label: 'My Buildings', icon: Building2 },
     { id: 'add-building', label: 'Add Building', icon: Plus },
-    { id: 'scan', label: 'AI Building Scan', icon: Cpu },
+    { id: 'import-buildings', label: 'Import Buildings', icon: FileUp },
+    { id: 'scan', label: 'Record Inspection', icon: Cpu },
     { id: 'monitor', label: 'Health Monitor (Memory™)', icon: Layers },
-    { id: 'alerts', label: 'Alerts', icon: Bell, badge: alerts.filter(a => !a.read).length },
-    { id: 'recommendations', label: 'AI Recommendations', icon: Zap },
+    { id: 'review-queue', label: 'Review Queue', icon: CheckCircle, badge: reviewQueue.length },
+    { id: 'alerts', label: 'Alerts & Tasks', icon: Bell, badge: alerts.filter(a => !a.read).length + dueWorkOrders.length },
+    { id: 'recommendations', label: 'Follow-up Recommendations', icon: Zap },
+    { id: 'work-orders', label: 'Inspection Tasks', icon: ClipboardCheck, badge: openWorkOrders },
     { id: 'reports', label: 'Reports & History', icon: FileText },
+    { id: 'audit-log', label: 'Audit History', icon: History },
     { id: 'settings', label: 'Settings', icon: Settings },
-  ];
+  ].filter(item => item.id === 'add-building'
+    || item.id === 'import-buildings'
+      ? canManageBuildings
+      : item.id === 'review-queue'
+        ? canReview
+    : ['scan', 'work-orders'].includes(item.id)
+      ? canEdit
+      : true);
 
   return (
     <div className="min-h-screen bg-[#090909] text-[#F5F0E5] flex font-sans selection:bg-[#B58B3B] selection:text-white">
@@ -651,10 +1922,21 @@ export default function App() {
 
           <div className="pt-6 mt-6 border-t border-[#222222]">
             <div className="px-3 py-2 mt-1 bg-[#222222]/50 rounded border border-[#222222]">
-              <div className="text-xs font-medium text-[#F5F0E5] truncate">Lachlan Ross</div>
-              <div className="text-[10px] text-[#A7A39A] truncate font-mono">Senior Structural Analyst</div>
+              <div className="text-xs font-medium text-[#F5F0E5] truncate">{currentUser?.name || 'Demo Analyst'}</div>
+              <div className="text-[10px] text-[#A7A39A] truncate font-mono">{isDemoSession ? 'DEMO' : currentUser?.role.replaceAll('_', ' ')}</div>
             </div>
-            <button onClick={() => setIsAuthenticated(false)} className="w-full mt-3 flex items-center gap-3 px-3 py-2 rounded text-xs text-red-400 hover:bg-red-500/10 transition-colors">
+            <button onClick={() => {
+              if (!isDemoSession && supabase) void supabase.auth.signOut();
+              isDemoSessionRef.current = false;
+              setIsAuthenticated(false);
+              setIsDemoSession(false);
+              setCurrentUser(null);
+              setUserId(null);
+              setOrganizationId(null);
+              setOrganizationName('');
+              setOrganizationLoading(false);
+              setCurrentScreen('login');
+            }} className="w-full mt-3 flex items-center gap-3 px-3 py-2 rounded text-xs text-red-400 hover:bg-red-500/10 transition-colors">
               <LogOut className="w-4 h-4" />
               <span>Sign Out</span>
             </button>
@@ -670,7 +1952,7 @@ export default function App() {
             </button>
             <div className="hidden sm:flex items-center gap-2 text-xs text-[#A7A39A] font-mono">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>TELEMETRY STREAM ACTIVE • SYD-MEL HUB</span>
+              <span>{isDemoSession ? 'LOCAL DEMO DATA • BROWSER STORAGE' : `${organizationName.toUpperCase()} • AUTHENTICATED WORKSPACE`}</span>
             </div>
           </div>
 
@@ -681,9 +1963,9 @@ export default function App() {
             </button>
             <button onClick={() => setCurrentScreen('alerts')} className="relative p-2 rounded bg-[#222222] text-[#A7A39A] hover:text-[#F5F0E5] transition-colors">
               <Bell className="w-4 h-4" />
-              {alerts.filter(a => !a.read).length > 0 && (
+              {alerts.filter(a => !a.read).length + dueWorkOrders.length > 0 && (
                 <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center">
-                  {alerts.filter(a => !a.read).length}
+                  {alerts.filter(a => !a.read).length + dueWorkOrders.length}
                 </span>
               )}
             </button>
@@ -691,13 +1973,43 @@ export default function App() {
         </header>
 
         <main className="flex-1 p-6 lg:p-8 bg-[#090909] overflow-y-auto">
+          {buildingsLoading && (
+            <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
+              Loading buildings from Supabase…
+            </div>
+          )}
+          {buildingsError && (
+            <div role="alert" className="mb-4 p-3 rounded border border-amber-500/30 bg-amber-500/10 text-xs text-amber-200">
+              Building data could not be loaded from Supabase: {buildingsError} {isDemoSession ? 'Using local demo buildings instead.' : 'Showing account-local buildings, if available.'}
+            </div>
+          )}
+          {!buildingsLoading && !buildingsError && (
+            <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
+              {supabaseBuildings.length > 0
+                ? `Loaded ${supabaseBuildings.length} buildings from Supabase.`
+                : isDemoSession
+                  ? 'No buildings found in Supabase; using local demo buildings.'
+                  : activeBuildings.length > 0
+                    ? 'Showing account-local buildings; these are not shared with organization members.'
+                    : 'No buildings are assigned to this organization yet.'}
+            </div>
+          )}
+          {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some changes could not be saved in this browser: {storageError}. Export or copy important records before leaving.</div>}
           {currentScreen === 'map' && (
-            <IncidentMap 
-              buildings={buildings} 
-              onSelectBuilding={(id) => {
+            <WorldMap
+              key={selectedBuildingId}
+              buildings={activeBuildings}
+              canScan={canEdit}
+              selectedBuildingId={selectedBuildingId}
+              onScan={(id) => {
+                if (!canEdit) return;
                 setSelectedBuildingId(id);
                 setCurrentScreen('scan');
-              }} 
+              }}
+              onMemory={(id) => {
+                setSelectedBuildingId(id);
+                setCurrentScreen('monitor');
+              }}
             />
           )}
 
@@ -706,7 +2018,7 @@ export default function App() {
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                   <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Structural Command Dashboard</h1>
-                  <p className="text-sm text-[#A7A39A]">Real-time portfolio telemetry and automated structural health indexing.</p>
+                  <p className="text-sm text-[#A7A39A]">Building status, saved inspection records, alerts, and follow-up work.</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <button
@@ -716,27 +2028,25 @@ export default function App() {
                     <MapPin className="w-4 h-4" />
                     <span>VIEW INCIDENT MAP</span>
                   </button>
-                  <button
+                  {canEdit && <button
                     onClick={() => setCurrentScreen('scan')}
                     className="px-5 py-3 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center justify-center gap-2 shadow-lg shadow-[#B58B3B]/20 cursor-pointer"
                   >
                     <Cpu className="w-4 h-4" />
-                    <span>START NEW BUILDING SCAN</span>
-                  </button>
+                    <span>RECORD INSPECTION</span>
+                  </button>}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-4">
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Total Buildings</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{buildings.length}</div>
-                  <div className="text-[10px] text-emerald-400 mt-2 flex items-center gap-1">
-                    <ArrowUpRight className="w-3 h-3" /> 100% Monitored
-                  </div>
+                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{activeBuildings.length}</div>
+                  <div className="text-[10px] text-[#A7A39A] mt-2">{buildingsWithRecords} with inspection records</div>
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Health Index</div>
-                  <div className="text-2xl font-bold text-[#E5C77B] font-mono">84.9%</div>
+                  <div className="text-2xl font-bold text-[#E5C77B] font-mono">{portfolioHealthAverage}</div>
                   <div className="text-[10px] text-[#A7A39A] mt-2">Portfolio Average</div>
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
@@ -746,40 +2056,59 @@ export default function App() {
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Scans Completed</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{scans.length + 24}</div>
-                  <div className="text-[10px] text-emerald-400 mt-2">YTD Telemetry</div>
+                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{scans.length}</div>
+                  <div className="text-[10px] text-emerald-400 mt-2">Recorded inspections</div>
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Attention Required</div>
-                  <div className="text-2xl font-bold text-amber-400 font-mono">1</div>
-                  <div className="text-[10px] text-amber-400 mt-2">Engineers Notified</div>
+                  <div className="text-2xl font-bold text-amber-400 font-mono">{activeBuildings.filter(building => building.status === 'Inspection Recommended' || building.status === 'Urgent Assessment').length}</div>
+                  <div className="text-[10px] text-amber-400 mt-2">Buildings need review</div>
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Awaiting Inspection</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">0</div>
-                  <div className="text-[10px] text-emerald-400 mt-2">Queue Cleared</div>
+                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{openWorkOrders}</div>
+                  <div className={`text-[10px] mt-2 ${dueWorkOrders.length ? 'text-amber-300' : 'text-[#A7A39A]'}`}>{dueWorkOrders.length} due today or overdue</div>
+                </div>
+                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
+                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Review Queue</div>
+                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{reviewQueue.length}</div>
+                  <div className="text-[10px] text-[#A7A39A] mt-2">Submitted inspections</div>
                 </div>
               </div>
+
+              {dueWorkOrders.length > 0 && (
+                <section className="p-4 bg-amber-500/10 border border-amber-500/30 rounded flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <CalendarClock className="w-4 h-4 mt-0.5 text-amber-300" />
+                    <div>
+                      <h2 className="text-sm font-bold text-amber-200">{dueWorkOrders.length} inspection task{dueWorkOrders.length === 1 ? '' : 's'} due or overdue</h2>
+                      <p className="text-xs text-amber-100/70 mt-1">{dueWorkOrders.slice(0, 3).map(order => order.title).join(' · ')}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setCurrentScreen('work-orders')} className="px-3 py-2 bg-[#222222] rounded text-xs text-[#E5C77B]">Review tasks</button>
+                </section>
+              )}
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 p-6 bg-[#191919] border border-[#222222] rounded">
                   <div className="flex items-center justify-between mb-6">
                     <div>
-                      <h3 className="text-base font-bold text-[#F5F0E5]">Structural Health Trend (Q1 - Q4 2026)</h3>
-                      <p className="text-xs text-[#A7A39A]">Longitudinal indexing across NSW asset portfolio</p>
+                      <h3 className="text-base font-bold text-[#F5F0E5]">Recent Inspection History</h3>
+                      <p className="text-xs text-[#A7A39A]">Latest saved observations across the portfolio</p>
                     </div>
-                    <span className="px-2 py-1 bg-[#222222] text-[#E5C77B] text-xs font-mono rounded border border-[#222222]">Live Telemetry</span>
+                    <button onClick={() => setCurrentScreen('reports')} className="px-2 py-1 bg-[#222222] text-[#E5C77B] text-xs font-mono rounded border border-[#222222]">View reports</button>
                   </div>
-                  <div className="h-64 w-full flex items-end gap-3 pt-6 pb-2 px-2 border-b border-[#222222]">
-                    {[65, 70, 68, 75, 72, 78, 80, 82, 81, 84, 85, 84.9].map((val, idx) => (
-                      <div key={idx} className="flex-1 flex flex-col items-center gap-2 h-full justify-end group relative">
-                        <div className="absolute -top-8 bg-[#222222] text-[#E5C77B] text-[10px] font-mono px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 border border-[#B58B3B]/30">
-                          {val}% Health
-                        </div>
-                        <div className="w-full bg-gradient-to-t from-[#B58B3B]/40 to-[#E5C77B] rounded-t transition-all duration-500 group-hover:brightness-125" style={{ height: `${val}%` }}></div>
-                        <span className="text-[10px] text-[#A7A39A] font-mono">M{idx + 1}</span>
-                      </div>
+                  <div className="space-y-3">
+                    {scans.slice(0, 5).map(scan => (
+                      <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="w-full flex items-center justify-between gap-4 p-3 bg-[#090909] border border-[#222222] rounded text-left hover:border-[#B58B3B]/40">
+                        <span className="min-w-0">
+                          <span className="block text-xs text-[#F5F0E5] truncate">{scan.buildingName} · {scan.component}</span>
+                          <span className="block text-[10px] text-[#A7A39A]">{formatRecordDate(scan.date)}</span>
+                        </span>
+                        <span className="shrink-0 text-[10px] text-[#E5C77B]">{scan.concernLevel}</span>
+                      </button>
                     ))}
+                    {scans.length === 0 && <p className="text-xs text-[#A7A39A]">No inspection records yet.</p>}
                   </div>
                 </div>
 
@@ -794,9 +2123,12 @@ export default function App() {
                         <div key={alt.id} className="p-3 bg-[#222222]/50 border border-[#222222] rounded">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-xs font-medium text-[#F5F0E5] truncate">{alt.title}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${alt.severity === 'High' ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
-                              {alt.severity}
-                            </span>
+                            <div className="flex items-center gap-1">
+                              {alt.source === 'demo' && <span className="text-[9px] text-[#A7A39A]">DEMO</span>}
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${alt.severity === 'High' || alt.severity === 'Urgent' ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
+                                {alt.severity}
+                              </span>
+                            </div>
                           </div>
                           <p className="text-[11px] text-[#A7A39A] truncate">{alt.buildingName}</p>
                         </div>
@@ -816,7 +2148,7 @@ export default function App() {
                   <button onClick={() => setCurrentScreen('buildings')} className="text-xs text-[#B58B3B] hover:underline">Manage Portfolio →</button>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  {buildings.map((bld) => (
+                  {activeBuildings.map((bld) => (
                     <div key={bld.id} className="bg-[#191919] border border-[#222222] rounded overflow-hidden flex flex-col justify-between group">
                       <div>
                         <div className="h-40 overflow-hidden relative">
@@ -833,7 +2165,7 @@ export default function App() {
                           <div className="grid grid-cols-2 gap-2 py-3 border-t border-b border-[#222222] text-xs font-mono mb-4">
                             <div>
                               <span className="text-[#A7A39A] block">Health Index</span>
-                              <span className="text-[#E5C77B] font-bold">{bld.healthIndex}%</span>
+                              <span className="text-[#E5C77B] font-bold">{bld.healthIndex != null ? `${bld.healthIndex}%` : 'Not available'}</span>
                             </div>
                             <div>
                               <span className="text-[#A7A39A] block">Status</span>
@@ -843,10 +2175,10 @@ export default function App() {
                         </div>
                       </div>
                       <div className="px-5 pb-5 pt-0 flex items-center gap-2">
-                        <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors flex items-center justify-center gap-1.5">
+                        {canEdit && <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors flex items-center justify-center gap-1.5">
                           <Cpu className="w-3.5 h-3.5" />
-                          <span>Scan Building</span>
-                        </button>
+                          <span>Record Inspection</span>
+                        </button>}
                         <button onClick={() => setCurrentScreen('map')} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs rounded transition-colors" title="Locate on Map">
                           <MapPin className="w-3.5 h-3.5 text-[#E5C77B]" />
                         </button>
@@ -865,13 +2197,34 @@ export default function App() {
                   <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Building Portfolio Management</h1>
                   <p className="text-sm text-[#A7A39A]">Registered architectural assets and automated telemetry profiles.</p>
                 </div>
-                <button onClick={() => setCurrentScreen('add-building')} className="px-4 py-2.5 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center gap-2">
-                  <Plus className="w-4 h-4" />
-                  <span>Register New Building</span>
-                </button>
+                {canManageBuildings && <div className="flex flex-wrap gap-2">
+                  <button onClick={() => setCurrentScreen('import-buildings')} className="px-4 py-2.5 bg-[#191919] border border-[#B58B3B]/40 text-[#E5C77B] font-semibold text-xs rounded transition-colors flex items-center gap-2">
+                    <FileUp className="w-4 h-4" /><span>Import CSV</span>
+                  </button>
+                  <button onClick={() => setCurrentScreen('add-building')} className="px-4 py-2.5 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center gap-2">
+                    <Plus className="w-4 h-4" />
+                    <span>Register New Building</span>
+                  </button>
+                </div>}
               </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 bg-[#191919] border border-[#222222] rounded">
+                <label className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#A7A39A]" />
+                  <input value={buildingSearch} onChange={event => setBuildingSearch(event.target.value)} placeholder="Search building or location" className="w-full pl-9 pr-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]" />
+                </label>
+                <select aria-label="Filter by building type" value={buildingTypeFilter} onChange={event => setBuildingTypeFilter(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                  {['All types', 'Residential', 'Commercial', 'Industrial', 'Institutional', 'Other'].map(type => <option key={type}>{type}</option>)}
+                </select>
+                <select aria-label="Filter by status" value={buildingStatusFilter} onChange={event => setBuildingStatusFilter(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                  {['All statuses', 'Low Concern', 'Inspection Recommended', 'Monitoring Required', 'Urgent Assessment'].map(status => <option key={status}>{status}</option>)}
+                </select>
+                <select aria-label="Sort buildings" value={buildingSort} onChange={event => setBuildingSort(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                  {['Name (A–Z)', 'Health (high–low)', 'Status'].map(sort => <option key={sort}>{sort}</option>)}
+                </select>
+              </div>
+              <p className="text-xs text-[#A7A39A]">{filteredBuildings.length} of {activeBuildings.length} buildings</p>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {buildings.map((bld) => (
+                {filteredBuildings.map((bld) => (
                   <div key={bld.id} className="p-5 bg-[#191919] border border-[#222222] rounded flex flex-col justify-between">
                     <div>
                       <div className="h-44 rounded overflow-hidden mb-4 relative">
@@ -883,16 +2236,59 @@ export default function App() {
                       <p className="text-xs text-[#A7A39A] mb-4 line-clamp-2">{bld.description}</p>
                     </div>
                     <div className="flex items-center gap-2 pt-3 border-t border-[#222222]">
-                      <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors">Run AI Scan</button>
+                      {canEdit && <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors">Record Inspection</button>}
                       <button onClick={() => setCurrentScreen('map')} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs text-[#E5C77B] rounded font-mono">Map Pin</button>
                     </div>
                   </div>
                 ))}
               </div>
+              {filteredBuildings.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No buildings match those filters.</p>}
             </div>
           )}
 
-          {currentScreen === 'add-building' && (
+          {currentScreen === 'import-buildings' && canManageBuildings && (
+            <div className="max-w-5xl mx-auto space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-bold text-[#F5F0E5]">Import Buildings from CSV</h1>
+                  <p className="mt-1 text-sm text-[#A7A39A]">Validate a file before adding any rows. Invalid rows are reported and skipped.</p>
+                </div>
+                <button onClick={downloadBuildingCsvTemplate} className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Download CSV template</button>
+              </div>
+              <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-4">
+                <p className="text-xs text-[#A7A39A]">Required columns: <code>name, location, lat, lng</code>. Optional columns: <code>type, year, floors, description</code>. Imported rows are saved in this browser only.</p>
+                <label className="px-4 py-3 bg-[#222222] hover:bg-[#333333] text-[#F5F0E5] text-xs rounded cursor-pointer inline-flex items-center gap-2">
+                  <Upload className="w-4 h-4 text-[#E5C77B]" />
+                  <span>{buildingCsvName || 'Choose a .csv file'}</span>
+                  <input type="file" accept=".csv,text/csv" className="hidden" onChange={event => void handleBuildingCsvFile(event)} />
+                </label>
+                {(buildingCsvPreview.length > 0 || buildingCsvErrors.length > 0) && (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center gap-4 text-xs">
+                      <span className="text-emerald-300">{buildingCsvPreview.length} valid row{buildingCsvPreview.length === 1 ? '' : 's'}</span>
+                      <span className={buildingCsvErrors.length ? 'text-amber-300' : 'text-[#A7A39A]'}>{buildingCsvErrors.length} row/file error{buildingCsvErrors.length === 1 ? '' : 's'}</span>
+                    </div>
+                    {buildingCsvErrors.length > 0 && <ul className="max-h-48 overflow-y-auto space-y-1 p-3 bg-[#090909] border border-amber-500/20 rounded text-xs text-amber-200">{buildingCsvErrors.map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}</ul>}
+                    {buildingCsvPreview.length > 0 && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="text-[#A7A39A]"><tr><th className="p-2">CSV row</th><th className="p-2">Building</th><th className="p-2">Location</th><th className="p-2">Coordinates</th><th className="p-2">Category</th></tr></thead>
+                          <tbody>{buildingCsvPreview.slice(0, 100).map(row => <tr key={row.building.id} className="border-t border-[#222222]"><td className="p-2 text-[#A7A39A]">{row.line}</td><td className="p-2">{row.building.name}</td><td className="p-2">{row.building.location}</td><td className="p-2">{row.building.lat}, {row.building.lng}</td><td className="p-2">{row.building.type}</td></tr>)}</tbody>
+                        </table>
+                        {buildingCsvPreview.length > 100 && <p className="mt-2 text-xs text-[#A7A39A]">Showing first 100 of {buildingCsvPreview.length} valid rows.</p>}
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <button onClick={importValidBuildings} disabled={buildingCsvPreview.length === 0} className="px-4 py-2 bg-[#E5C77B] disabled:opacity-40 text-[#090909] text-xs font-semibold rounded">Import {buildingCsvPreview.length} valid row{buildingCsvPreview.length === 1 ? '' : 's'}</button>
+                      <button onClick={() => { setBuildingCsvName(''); setBuildingCsvPreview([]); setBuildingCsvErrors([]); }} className="px-4 py-2 bg-[#222222] text-[#A7A39A] text-xs rounded">Clear preview</button>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {currentScreen === 'add-building' && canManageBuildings && (
             <div className="max-w-2xl mx-auto space-y-6">
               <div>
                 <h1 className="text-2xl font-bold text-[#F5F0E5] mb-1">Register New Building & Incident Pin</h1>
@@ -941,18 +2337,18 @@ export default function App() {
             </div>
           )}
 
-          {currentScreen === 'scan' && (
+          {currentScreen === 'scan' && canEdit && (
             <div className="max-w-4xl mx-auto space-y-6">
               <div>
-                <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">AI Computer Vision Inspection Workspace</h1>
-                <p className="text-sm text-[#A7A39A]">Upload structural component photographs for automated fissure detection and defect classification.</p>
+                <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">{editingRecordId ? 'Edit Inspection Record' : 'Record an Inspection'}</h1>
+                <p className="text-sm text-[#A7A39A]">{editingRecordId ? 'Update the requested inspection details, then submit the record for review again.' : 'Save inspector-entered findings, measurements, and photo evidence. This workspace does not perform automated image analysis.'}</p>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="p-6 bg-[#191919] border border-[#222222] rounded space-y-6">
+              <form onSubmit={saveInspectionRecord} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="p-6 bg-[#191919] border border-[#222222] rounded space-y-5">
                   <div>
                     <label className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Select Target Building</label>
-                    <select value={selectedBuildingId} onChange={(e) => setSelectedBuildingId(e.target.value)} className="w-full px-3 py-2.5 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]">
-                      {buildings.map(b => (<option key={b.id} value={b.id}>{b.name}</option>))}
+                    <select disabled={Boolean(editingRecordId)} value={activeSelectedBuildingId} onChange={(e) => setSelectedBuildingId(e.target.value)} className="w-full px-3 py-2.5 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5] disabled:opacity-60">
+                      {activeBuildings.map(b => (<option key={b.id} value={b.id}>{b.name}</option>))}
                     </select>
                   </div>
                   <div>
@@ -961,29 +2357,88 @@ export default function App() {
                       {['Walls', 'Columns', 'Beams', 'Ceilings', 'Pillars', 'Floors', 'Foundations', 'Other'].map(comp => (<option key={comp} value={comp}>{comp}</option>))}
                     </select>
                   </div>
-                  <button onClick={startAiScanSimulation} disabled={isScanning} className="w-full py-3 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold rounded text-xs flex items-center justify-center gap-2 cursor-pointer">
-                    {isScanning ? <><RefreshCw className="w-4 h-4 animate-spin" /><span>Analyzing ({scanProgress}%)</span></> : <><Cpu className="w-4 h-4" /><span>START AI ANALYSIS</span></>}
+                  {selectedChecklist && (
+                    <fieldset className="space-y-3">
+                      <legend className="text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Inspection checklist</legend>
+                      <select aria-label="Checklist template" value={selectedChecklist.id} onChange={event => {
+                        setSelectedChecklistId(event.target.value);
+                        setChecklistResponses({});
+                      }} className="w-full px-3 py-2.5 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]">
+                        {availableChecklistTemplates.map(template => <option key={template.id} value={template.id}>{template.name}</option>)}
+                      </select>
+                      <div className="space-y-2">
+                        {selectedChecklist.items.map(item => (
+                          <label key={item} className="flex items-start gap-2 text-[11px] text-[#A7A39A]">
+                            <input type="checkbox" checked={checklistResponses[item] === true} onChange={event => setChecklistResponses(current => ({ ...current, [item]: event.target.checked }))} className="mt-0.5 accent-[#E5C77B]" />
+                            <span>{item}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  )}
+                  <div>
+                    <label className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Inspector-assessed concern</label>
+                    <select value={scanConcern} onChange={event => setScanConcern(event.target.value as ScanRecord['concernLevel'])} className="w-full px-3 py-2.5 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]">
+                      {['Low Concern', 'Moderate Concern', 'High Concern', 'Urgent Professional Assessment'].map(level => <option key={level}>{level}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-xs text-[#A7A39A]">Crack length (mm)
+                      <input type="number" min="0" step="any" value={scanCrackLength} onChange={event => setScanCrackLength(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="Optional" />
+                    </label>
+                    <label className="text-xs text-[#A7A39A]">Crack width (mm)
+                      <input type="number" min="0" step="any" value={scanCrackWidth} onChange={event => setScanCrackWidth(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="Optional" />
+                    </label>
+                  </div>
+                  <button type="submit" className="w-full py-3 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold rounded text-xs flex items-center justify-center gap-2">
+                    <ClipboardCheck className="w-4 h-4" /> {editingRecordId ? 'Save changes' : 'Save inspection record'}
                   </button>
+                  {editingRecordId && <button type="button" onClick={() => {
+                    setEditingRecordId(null);
+                    setCurrentScreen('diagnosis');
+                  }} className="w-full py-2 bg-[#222222] text-[#A7A39A] text-xs rounded">Cancel editing</button>}
+                  {scanError && <p role="alert" className="text-xs text-red-300">{scanError}</p>}
                 </div>
                 <div className="lg:col-span-2 p-6 bg-[#191919] border border-[#222222] rounded">
-                  <div className="border-2 border-dashed border-[#222222] rounded-xl p-6 text-center bg-[#090909] relative overflow-hidden">
-                    {isScanning && (
-                      <div className="absolute inset-0 bg-[#090909]/90 z-20 flex flex-col items-center justify-center space-y-4">
-                        <div className="w-16 h-16 rounded-full border-4 border-[#B58B3B]/20 border-t-[#E5C77B] animate-spin"></div>
-                        <div className="text-sm font-mono text-[#E5C77B]">Scanning Neural Weights & Fissures... {scanProgress}%</div>
-                      </div>
-                    )}
+                  <div className="space-y-4">
                     <div className="h-64 rounded overflow-hidden relative mb-4">
-                      <img src={buildings.find(b => b.id === selectedBuildingId)?.imageUrl || INITIAL_BUILDINGS[0].imageUrl} alt="Preview" className="w-full h-full object-cover" />
+                      <img
+                        src={uploadedImageUrl || activeBuildings.find(b => b.id === activeSelectedBuildingId)?.imageUrl || INITIAL_BUILDINGS[0].imageUrl}
+                        alt="Selected inspection photo evidence"
+                        className="w-full h-full object-cover"
+                      />
                     </div>
                     <label className="px-4 py-2 bg-[#222222] hover:bg-[#333333] text-[#F5F0E5] text-xs font-medium rounded cursor-pointer inline-flex items-center gap-2">
                       <Upload className="w-4 h-4 text-[#E5C77B]" />
                       <span>Upload New Photograph</span>
-                      <input type="file" accept="image/*" className="hidden" onChange={() => alert('Custom image uploaded successfully to inspection queue.')} />
+                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleImageUpload} />
+                    </label>
+                    {uploadedImageUrl && (
+                      <div className="mt-4 p-3 bg-[#191919] border border-[#B58B3B]/40 rounded space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-[#E5C77B] font-medium truncate">{uploadedFileName || 'Uploaded image'}</span>
+                          <button
+                            type="button"
+                            onClick={clearUploadedImage}
+                            className="text-[#A7A39A] hover:text-[#F5F0E5]"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <img
+                          src={uploadedImageUrl}
+                          alt="Uploaded inspection evidence preview"
+                          className="w-full max-h-96 object-contain rounded border border-[#222222] bg-[#090909]"
+                        />
+                      </div>
+                    )}
+                    <label className="block text-left text-xs text-[#A7A39A]">
+                      Inspector observations (one per line) *
+                      <textarea required value={scanNotes} onChange={event => setScanNotes(event.target.value)} rows={5} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="Describe what was observed and where. Do not treat this demo as an engineering diagnosis." />
                     </label>
                   </div>
                 </div>
-              </div>
+              </form>
             </div>
           )}
 
@@ -991,8 +2446,8 @@ export default function App() {
             <div className="max-w-5xl mx-auto space-y-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold tracking-tight text-[#F5F0E5]">AI Structural Diagnosis & Analysis Results</h1>
-                  <p className="text-sm text-[#A7A39A]">Preliminary computer-vision telemetry report for {currentScanResult.buildingName}</p>
+                  <h1 className="text-2xl font-bold tracking-tight text-[#F5F0E5]">Inspection Record</h1>
+                  <p className="text-sm text-[#A7A39A]">{currentScanResult.buildingName} · {currentScanResult.component} · {formatRecordDate(currentScanResult.date)}</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <button onClick={() => setCurrentScreen('map')} className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded font-mono flex items-center gap-1.5">
@@ -1006,47 +2461,147 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-mono uppercase text-[#A7A39A]">Fissure Detection Overlay</span>
-                    <button onClick={() => setShowBoundingBoxes(!showBoundingBoxes)} className="px-3 py-1 bg-[#222222] text-xs font-mono text-[#E5C77B] rounded">
-                      {showBoundingBoxes ? 'Hide Overlays' : 'Show Overlays'}
-                    </button>
+                    <span className="text-xs font-mono uppercase text-[#A7A39A]">Photo evidence</span>
+                    <span className="text-[10px] text-[#A7A39A]">{currentScanResult.source === 'manual' ? 'Inspector-entered' : 'Preloaded demo record'}</span>
                   </div>
                   <div className="h-80 rounded overflow-hidden relative border border-[#222222]">
-                    <img src={currentScanResult.imageUrl} alt="Result" className="w-full h-full object-cover" />
-                    {showBoundingBoxes && (
-                      <div className="absolute top-1/4 left-1/3 w-36 h-20 border-2 border-red-500 bg-red-500/10 rounded flex items-start p-1 animate-pulse">
-                        <span className="bg-red-500 text-white text-[9px] font-mono px-1 rounded">Fissure ID #A4-01 ({currentScanResult.crackWidth})</span>
-                      </div>
-                    )}
+                    <img
+                      src={currentScanResult.imageUrl}
+                      alt="Structural inspection scan"
+                      className="w-full h-full object-cover"
+                    />
                   </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 bg-[#090909] rounded"><span className="block text-[#A7A39A]">Recorded length</span><strong>{currentScanResult.crackLength}</strong></div>
+                    <div className="p-3 bg-[#090909] rounded"><span className="block text-[#A7A39A]">Recorded width</span><strong>{currentScanResult.crackWidth}</strong></div>
+                  </div>
+                  <ul className="list-disc pl-5 text-xs text-[#F5F0E5] space-y-1">
+                    {currentScanResult.observations.map((observation, index) => <li key={`${currentScanResult.id}-${index}`}>{observation}</li>)}
+                  </ul>
+                  {currentScanResult.checklist && currentScanResult.checklist.length > 0 && (
+                    <section className="pt-4 border-t border-[#222222] space-y-2">
+                      <h3 className="text-xs font-bold text-[#F5F0E5]">Checklist results</h3>
+                      {currentScanResult.checklist.map(item => (
+                        <div key={item.label} className="flex items-start gap-2 text-xs">
+                          {item.complete ? <CheckCircle className="w-3.5 h-3.5 mt-0.5 text-emerald-400" /> : <CircleAlert className="w-3.5 h-3.5 mt-0.5 text-amber-300" />}
+                          <span className={item.complete ? 'text-[#A7A39A]' : 'text-amber-100'}>{item.label}</span>
+                        </div>
+                      ))}
+                    </section>
+                  )}
                 </div>
                 <div className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
                   <h3 className="text-sm font-bold text-[#F5F0E5] font-mono uppercase">{currentScanResult.concernLevel}</h3>
+                  <p className="text-xs text-[#A7A39A]">Review status: <strong className="text-[#E5C77B]">{currentScanResult.reviewStatus || 'Demo record'}</strong></p>
                   <p className="text-xs text-[#A7A39A] leading-relaxed">{currentScanResult.summary}</p>
-                  <button onClick={() => setCurrentScreen('scan')} className="w-full py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded">Start Another Scan</button>
+                  <p className="text-[11px] text-amber-200">This is a recorded observation, not an engineering assessment. Engage a qualified professional for structural advice.</p>
+                  {canEdit && <button onClick={() => scheduleFollowUp(currentScanResult)} className="w-full py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded">Create follow-up task</button>}
+                  {canEdit && <button onClick={() => setCurrentScreen('scan')} className="w-full py-2.5 bg-[#222222] text-[#E5C77B] font-semibold text-xs rounded">Record another inspection</button>}
                 </div>
               </div>
+              {currentScanResult.source === 'manual' && (
+                <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h2 className="font-bold text-sm text-[#F5F0E5]">Inspection review workflow</h2>
+                      <p className="text-xs text-[#A7A39A] mt-1">Current status: {currentScanResult.reviewStatus || 'Draft'} · Created by {currentScanResult.createdBy || 'Unknown'}</p>
+                    </div>
+                    {canEdit && ['Draft', 'Changes Requested'].includes(currentScanResult.reviewStatus || 'Draft') && (
+                      <button onClick={() => startEditingInspection(currentScanResult)} className="px-4 py-2 bg-[#222222] text-[#E5C77B] text-xs rounded">Edit record</button>
+                    )}
+                    {canEdit && ['Draft', 'Changes Requested'].includes(currentScanResult.reviewStatus || 'Draft') && (
+                      <button onClick={() => updateInspectionReview(currentScanResult, 'Submitted')} className="px-4 py-2 bg-[#E5C77B] text-[#090909] text-xs font-semibold rounded">Submit for review</button>
+                    )}
+                    {canReview && currentScanResult.reviewStatus === 'Submitted' && (
+                      <button onClick={() => updateInspectionReview(currentScanResult, 'Under Review')} className="px-4 py-2 bg-[#222222] border border-[#B58B3B]/40 text-[#E5C77B] text-xs rounded">Start review</button>
+                    )}
+                  </div>
+                  {canReview && currentScanResult.reviewStatus === 'Under Review' && (
+                    <div className="space-y-3">
+                      <label className="block text-xs text-[#A7A39A]">Reviewer note (required when requesting changes)
+                        <textarea value={reviewNote} onChange={event => setReviewNote(event.target.value)} rows={2} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" />
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        <button onClick={() => updateInspectionReview(currentScanResult, 'Approved', reviewNote)} className="px-4 py-2 bg-emerald-500/20 text-emerald-200 border border-emerald-500/30 text-xs rounded">Approve</button>
+                        <button onClick={() => updateInspectionReview(currentScanResult, 'Changes Requested', reviewNote)} className="px-4 py-2 bg-amber-500/20 text-amber-200 border border-amber-500/30 text-xs rounded">Request changes</button>
+                      </div>
+                    </div>
+                  )}
+                  {canReview && currentScanResult.reviewStatus === 'Approved' && <button onClick={() => updateInspectionReview(currentScanResult, 'Closed')} className="px-4 py-2 bg-[#222222] text-[#E5C77B] text-xs rounded">Close review</button>}
+                  {reviewError && <p role="alert" className="text-xs text-red-300">{reviewError}</p>}
+                  {(currentScanResult.reviewerNotes || []).length > 0 && (
+                    <div className="border-t border-[#222222] pt-3 space-y-2">
+                      <h3 className="text-xs font-bold text-[#A7A39A]">Reviewer notes</h3>
+                      {currentScanResult.reviewerNotes?.map((note, index) => <p key={`${currentScanResult.id}-review-${index}`} className="text-xs text-[#A7A39A]">{note}</p>)}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+          )}
+
+          {currentScreen === 'review-queue' && canReview && (
+            <div className="max-w-5xl mx-auto space-y-5">
+              <div>
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Inspection Review Queue</h1>
+                <p className="mt-1 text-sm text-[#A7A39A]">Submitted records require a qualified reviewer before approval.</p>
+              </div>
+              {reviewQueue.map(scan => (
+                <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="w-full p-5 bg-[#191919] border border-[#222222] rounded text-left flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-[#B58B3B]/40">
+                  <span>
+                    <span className="block text-sm font-bold text-[#F5F0E5]">{scan.buildingName} · {scan.component}</span>
+                    <span className="block mt-1 text-xs text-[#A7A39A]">By {scan.createdBy || 'Unknown'} · {formatRecordDate(scan.date)}</span>
+                  </span>
+                  <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200">{scan.reviewStatus}</span>
+                </button>
+              ))}
+              {reviewQueue.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No inspections are waiting for review.</p>}
             </div>
           )}
 
           {currentScreen === 'monitor' && (
             <div className="space-y-6">
-              <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Building Memory™ & Longitudinal Monitoring</h1>
-              <div className="p-6 bg-[#191919] border border-[#222222] rounded space-y-6">
-                <h3 className="font-bold text-lg text-[#F5F0E5]">Parramatta Riverfront Residences — Column #14 Inspection Timeline</h3>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div className="p-4 bg-[#090909] border border-[#222222] rounded space-y-3">
-                    <div className="flex justify-between text-xs font-mono"><span className="text-[#A7A39A]">Baseline Scan</span><span>10 January 2026</span></div>
-                    <img src="https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80" alt="Baseline" className="w-full h-56 object-cover rounded grayscale" />
-                    <div className="text-xs font-mono text-[#E5C77B]">Recorded Width: 0.45 mm</div>
-                  </div>
-                  <div className="p-4 bg-[#090909] border border-[#222222] rounded space-y-3">
-                    <div className="flex justify-between text-xs font-mono"><span className="text-[#E5C77B]">Latest Scan</span><span>28 October 2026</span></div>
-                    <img src="https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80" alt="Latest" className="w-full h-56 object-cover rounded" />
-                    <div className="text-xs font-mono text-red-400">Recorded Width: 0.65 mm (+44.4%)</div>
-                  </div>
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Building Memory & Inspection History</h1>
+                  <p className="text-sm text-[#A7A39A]">Compare saved records for the same building and component.</p>
                 </div>
+                <select aria-label="Building history" value={memoryBuilding?.id || ''} onChange={event => setSelectedBuildingId(event.target.value)} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-sm text-[#F5F0E5]">
+                  {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
+                </select>
               </div>
+              {memoryLatest && (
+                <div className="p-4 bg-[#191919] border border-[#222222] rounded flex flex-wrap gap-4 items-center text-xs">
+                  <span className="text-[#A7A39A]">Latest recorded width change ({memoryLatest.component}):</span>
+                  <strong className={widthChange && widthChange.startsWith('+') ? 'text-amber-300' : 'text-[#E5C77B]'}>{widthChange || 'No comparable measurement'}</strong>
+                  <span className="text-[10px] text-[#A7A39A]">Measurements are manually entered; comparison is descriptive only.</span>
+                </div>
+              )}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {memoryComparisonScans.map((scan, index) => (
+                  <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="p-4 bg-[#191919] border border-[#222222] rounded text-left space-y-3 hover:border-[#B58B3B]/40">
+                    <div className="flex justify-between gap-3 text-xs">
+                      <span className={index === 0 ? 'text-[#E5C77B]' : 'text-[#A7A39A]'}>{index === 0 ? 'Latest record' : 'Previous record'} · {scan.component}</span>
+                      <span>{formatRecordDate(scan.date)}</span>
+                    </div>
+                    <img src={scan.imageUrl} alt={`${scan.component} inspection evidence`} className="w-full h-56 object-cover rounded" />
+                    <div className="flex justify-between text-xs"><span>Width: {scan.crackWidth}</span><span>{scan.concernLevel}</span></div>
+                    <p className="text-xs text-[#A7A39A] line-clamp-2">{scan.observations.join(' ')}</p>
+                  </button>
+                ))}
+              </div>
+              {memoryScans.length > 0 && (
+                <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-3">
+                  <h2 className="text-sm font-bold text-[#F5F0E5]">All records · {memoryScans.length}</h2>
+                  {memoryScans.map(scan => (
+                    <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="w-full flex items-center justify-between gap-4 border-t border-[#222222] pt-3 text-left">
+                      <span className="text-xs text-[#F5F0E5]">{scan.component} · {scan.concernLevel}</span>
+                      <span className="text-[11px] text-[#A7A39A]">{formatRecordDate(scan.date)}</span>
+                    </button>
+                  ))}
+                </section>
+              )}
+              {memoryScans.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No inspection history for this building yet.</p>}
             </div>
           )}
 
@@ -1054,56 +2609,301 @@ export default function App() {
             <div className="space-y-6">
               <div className="flex justify-between items-center">
                 <h1 className="text-2xl font-bold text-[#F5F0E5]">Alerts & Notification Centre</h1>
-                <button onClick={() => setAlerts(alerts.map(a => ({...a, read: true})))} className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded font-mono">Mark All as Read</button>
+                <div className="flex items-center gap-3">
+                  <select aria-label="Filter alerts by severity" value={alertSeverityFilter} onChange={event => setAlertSeverityFilter(event.target.value)} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                    {['All severities', 'Low', 'Moderate', 'High', 'Urgent'].map(severity => <option key={severity}>{severity}</option>)}
+                  </select>
+                  <button onClick={() => {
+                    const unread = alerts.filter(item => !item.read).length;
+                    setAlerts(current => current.map(item => ({ ...item, read: true })));
+                    if (unread) recordAudit('Marked all alerts read', 'Alerts', 'all', `${unread} alerts marked read.`);
+                  }} className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded font-mono">Mark All as Read</button>
+                </div>
               </div>
+              <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-bold text-[#F5F0E5]">Task reminders</h2>
+                    <p className="text-xs text-[#A7A39A] mt-1">Due-date reminders are generated while this workspace is open.</p>
+                  </div>
+                  <button onClick={() => setCurrentScreen('settings')} className="text-xs text-[#E5C77B] hover:underline">Notification settings</button>
+                </div>
+                {dueWorkOrders.map(order => (
+                  <button key={order.id} onClick={() => setCurrentScreen('work-orders')} className="w-full p-3 bg-[#090909] border border-amber-500/20 rounded flex items-center justify-between gap-3 text-left">
+                    <span className="min-w-0">
+                      <span className="block text-xs text-[#F5F0E5] truncate">{order.title}</span>
+                      <span className="block text-[11px] text-[#A7A39A]">Due {order.dueDate} · {activeBuildings.find(building => building.id === order.buildingId)?.name || 'Building'}</span>
+                    </span>
+                    <span className={order.dueDate < todayDate ? 'text-xs text-red-300' : 'text-xs text-amber-200'}>{order.dueDate < todayDate ? 'Overdue' : 'Due today'}</span>
+                  </button>
+                ))}
+                {dueWorkOrders.length === 0 && <p className="text-xs text-[#A7A39A]">No tasks are due today or overdue.</p>}
+              </section>
               <div className="space-y-4">
-                {alerts.map((alt) => (
-                  <div key={alt.id} className="p-5 bg-[#191919] border border-[#222222] rounded flex justify-between items-center">
-                    <div>
-                      <h3 className="font-bold text-[#F5F0E5] text-sm">{alt.title} — <span className="text-[#E5C77B]">{alt.buildingName}</span></h3>
+                {filteredAlerts.map((alt) => (
+                  <div key={alt.id} className={`p-5 bg-[#191919] border rounded flex flex-col md:flex-row md:justify-between md:items-center gap-4 ${alt.read ? 'border-[#222222]' : 'border-[#B58B3B]/50'}`}>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-[#F5F0E5] text-sm">{alt.title} — <span className="text-[#E5C77B]">{alt.buildingName}</span></h3>
+                        {alt.source === 'demo' && <span className="text-[9px] text-[#A7A39A]">DEMO</span>}
+                        {!alt.read && <span className="text-[9px] uppercase text-amber-300">Unread</span>}
+                      </div>
                       <p className="text-xs text-[#A7A39A] mt-1">{alt.description}</p>
+                      <p className="text-[11px] text-[#A7A39A] mt-2">{alt.recommendation} · {alt.timestamp}</p>
                     </div>
-                    <button onClick={() => setCurrentScreen('map')} className="px-3 py-1.5 bg-[#222222] text-xs text-[#E5C77B] rounded font-mono">Locate on Map</button>
+                    <div className="flex shrink-0 gap-2">
+                      <button onClick={() => toggleAlertRead(alt)} className="px-3 py-1.5 bg-[#222222] text-xs text-[#A7A39A] rounded">{alt.read ? 'Mark unread' : 'Mark read'}</button>
+                      <button onClick={() => openAlertTarget(alt)} className="px-3 py-1.5 bg-[#222222] text-xs text-[#E5C77B] rounded font-mono">{alt.scanId ? 'Open inspection' : 'Locate building'}</button>
+                    </div>
                   </div>
                 ))}
+                {filteredAlerts.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No alerts match this severity.</p>}
               </div>
             </div>
           )}
 
           {currentScreen === 'recommendations' && (
             <div className="space-y-6">
-              <h1 className="text-2xl font-bold text-[#F5F0E5]">AI Intelligent Recommendations</h1>
-              <div className="p-6 bg-[#191919] border border-[#222222] rounded space-y-3">
-                <span className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-red-500/20 text-red-400">Priority: High</span>
-                <h3 className="font-bold text-base text-[#F5F0E5]">Certified Structural Engineering Assessment — Parramatta Riverfront Residences</h3>
-                <p className="text-xs text-[#A7A39A]">Visible diagonal cracking identified in primary reinforced concrete column #14 has expanded by 44.4% over 9 months. Immediate engagement with a registered NPER structural engineer is strongly advised.</p>
+              <div>
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Review Recommendations</h1>
+                <p className="text-xs text-[#A7A39A] mt-1">Follow-ups are derived from recorded high-concern observations and are not automated engineering advice.</p>
+              </div>
+              {actionableScans.map(scan => (
+                <div key={scan.id} className="p-6 bg-[#191919] border border-[#222222] rounded space-y-3">
+                  <span className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-red-500/20 text-red-300">{scan.concernLevel}</span>
+                  <h3 className="font-bold text-base text-[#F5F0E5]">{scan.buildingName} · {scan.component}</h3>
+                  <p className="text-xs text-[#A7A39A]">{scan.observations.join(' ')}</p>
+                  <p className="text-[11px] text-amber-200">Arrange review by a qualified structural professional.</p>
+                  {canEdit && <button onClick={() => scheduleFollowUp(scan)} className="px-4 py-2 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded">Create follow-up task</button>}
+                </div>
+              ))}
+              {actionableScans.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No high-concern records currently need follow-up.</p>}
+            </div>
+          )}
+
+          {currentScreen === 'work-orders' && canEdit && (
+            <div className="max-w-5xl mx-auto space-y-6">
+              <div>
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Inspection Tasks & Work Orders</h1>
+                <p className="text-sm text-[#A7A39A]">Assign owners, set due dates, and track follow-up work. Tasks are saved in this browser; due and overdue tasks appear in Alerts.</p>
+              </div>
+              <form onSubmit={createWorkOrder} className="p-5 bg-[#191919] border border-[#222222] rounded grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label className="text-xs text-[#A7A39A]">Building *
+                  <select required value={workOrderBuildingId} onChange={event => setWorkOrderBuildingId(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]">
+                    <option value="">Select a building</option>
+                    {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
+                  </select>
+                </label>
+                <label className="text-xs text-[#A7A39A]">Task title *
+                  <input required value={workOrderTitle} onChange={event => setWorkOrderTitle(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="Schedule structural review" />
+                </label>
+                <label className="text-xs text-[#A7A39A]">Assigned to
+                  <input type="email" value={workOrderAssignee} onChange={event => setWorkOrderAssignee(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="engineer@example.com" />
+                </label>
+                <label className="text-xs text-[#A7A39A]">Due date *
+                  <input required type="date" min={todayDate} value={workOrderDueDate} onChange={event => setWorkOrderDueDate(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" />
+                </label>
+                <label className="text-xs text-[#A7A39A] md:col-span-2">Description
+                  <textarea rows={2} value={workOrderDescription} onChange={event => setWorkOrderDescription(event.target.value)} className="mt-2 w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" />
+                </label>
+                {workOrderError && <p role="alert" className="md:col-span-2 text-xs text-red-300">{workOrderError}</p>}
+                <div className="md:col-span-2">
+                  <button type="submit" className="px-5 py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded">Create task</button>
+                </div>
+              </form>
+              <div className="space-y-3">
+                {workOrders.map(order => {
+                  const building = activeBuildings.find(item => item.id === order.buildingId);
+                  const isOverdue = order.status !== 'Completed' && order.dueDate < todayDate;
+                  return (
+                    <article key={order.id} className="p-5 bg-[#191919] border border-[#222222] rounded flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <h2 className="font-bold text-sm text-[#F5F0E5]">{order.title}</h2>
+                        <p className="text-xs text-[#A7A39A] mt-1">{building?.name || 'Building no longer available'} · Assigned: {order.assignedTo}</p>
+                        <p className="text-xs text-[#A7A39A] mt-1">{order.description || 'No additional notes.'}</p>
+                        <p className={`flex items-center gap-1 mt-2 text-[11px] ${isOverdue ? 'text-red-300' : 'text-[#A7A39A]'}`}><Clock className="w-3 h-3" />Due {order.dueDate}{isOverdue ? ' · Overdue' : ''}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {order.relatedScanId && <button onClick={() => {
+                          const related = scans.find(scan => scan.id === order.relatedScanId);
+                          if (related) { setCurrentScanResult(related); setCurrentScreen('diagnosis'); }
+                        }} className="px-3 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Open record</button>}
+                        <select aria-label={`Update status for ${order.title}`} value={order.status} onChange={event => updateWorkOrderStatus(order, event.target.value as WorkOrder['status'])} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                          {['Open', 'In Progress', 'Completed'].map(status => <option key={status}>{status}</option>)}
+                        </select>
+                      </div>
+                    </article>
+                  );
+                })}
+                {workOrders.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No work orders yet. Create one above or from a high-concern inspection record.</p>}
               </div>
             </div>
           )}
 
           {currentScreen === 'reports' && (
             <div className="space-y-6">
-              <div className="flex justify-between items-center">
-                <h1 className="text-2xl font-bold text-[#F5F0E5]">Reports & Audit History</h1>
-                <button onClick={() => window.print()} className="px-4 py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded flex items-center gap-2"><Download className="w-4 h-4" /> Download PDF Report</button>
+              <style>{`@media print { body * { visibility: hidden !important; } #printable-report, #printable-report * { visibility: visible !important; } #printable-report { position: absolute; inset: 0; width: 100%; color: #111 !important; background: #fff !important; } #printable-report img { max-height: 260px; object-fit: contain; } }`}</style>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Reports & Inspection History</h1>
+                <div className="flex gap-3">
+                  <select aria-label="Select report building" value={reportBuilding?.id || ''} onChange={event => setReportBuildingId(event.target.value)} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                    {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
+                  </select>
+                  <button onClick={() => window.print()} disabled={!reportBuilding} className="px-4 py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded flex items-center gap-2 disabled:opacity-50"><Download className="w-4 h-4" /> Print / Save PDF</button>
+                </div>
               </div>
-              <div className="p-8 bg-[#191919] border border-[#222222] rounded space-y-6 max-w-4xl mx-auto">
-                <h2 className="font-bold text-lg text-[#F5F0E5]">ARCHONIX STRUCTURAL TELEMETRY REPORT • ARC-2026-SYD-8821</h2>
-                <p className="text-xs text-[#F5F0E5] leading-relaxed">Asset: Parramatta Riverfront Residences (Parramatta NSW 2150). Automated computer-vision analysis indicates diagonal micro-fissuring along primary reinforced concrete columns. Immediate professional structural inspection is required under AS 4349 protocols.</p>
+              <div id="printable-report" className="p-8 bg-[#191919] border border-[#222222] rounded space-y-6 max-w-4xl mx-auto">
+                {reportBuilding ? <>
+                  <header className="space-y-2 border-b border-[#222222] pb-5">
+                    <p className="text-[10px] uppercase tracking-widest text-[#B58B3B]">ARCHONIX · Inspection record report</p>
+                    <h2 className="font-bold text-xl text-[#F5F0E5]">{reportBuilding.name}</h2>
+                    <p className="text-xs text-[#A7A39A]">{reportBuilding.location}</p>
+                    <div className="flex flex-wrap gap-4 text-xs text-[#A7A39A]">
+                      <span>Building status: {reportBuilding.status}</span><span>Type: {reportBuilding.type}</span>
+                      <span>Generated: {reportGeneratedDate}</span>
+                    </div>
+                  </header>
+                  <section className="space-y-3">
+                    <h3 className="font-semibold text-sm text-[#F5F0E5]">Inspection records ({reportScans.length})</h3>
+                    {reportScans.map(scan => (
+                      <article key={scan.id} className="p-4 border border-[#333] rounded space-y-3">
+                        <div className="flex justify-between gap-3 text-xs"><strong>{scan.component} · {scan.concernLevel} · {scan.reviewStatus || 'Demo record'}</strong><span>{formatRecordDate(scan.date)}</span></div>
+                        <p className="text-xs">Crack length: {scan.crackLength} · Width: {scan.crackWidth}</p>
+                        <p className="text-xs">{scan.observations.join(' ')}</p>
+                        {scan.checklist && scan.checklist.length > 0 && <p className="text-xs">Checklist: {scan.checklist.filter(item => item.complete).length}/{scan.checklist.length} items marked complete.</p>}
+                        <img src={scan.imageUrl} alt={`${scan.component} evidence`} className="w-full max-h-64 object-contain rounded" />
+                        <p className="text-[10px]">Source: {scan.source === 'manual' ? 'Inspector-entered' : 'Preloaded demo record'}. Not an engineering assessment.</p>
+                      </article>
+                    ))}
+                    {reportScans.length === 0 && <p className="text-xs text-[#A7A39A]">No inspection records for this building.</p>}
+                  </section>
+                  <section className="space-y-2">
+                    <h3 className="font-semibold text-sm text-[#F5F0E5]">Open follow-up tasks</h3>
+                    {workOrders.filter(order => order.buildingId === reportBuilding.id && order.status !== 'Completed').map(order => (
+                      <p key={order.id} className="text-xs">{order.title} · {order.status} · Due {order.dueDate} · {order.assignedTo}</p>
+                    ))}
+                    {!workOrders.some(order => order.buildingId === reportBuilding.id && order.status !== 'Completed') && <p className="text-xs text-[#A7A39A]">No open tasks.</p>}
+                  </section>
+                  <p className="border-t border-[#222222] pt-4 text-[10px] text-[#A7A39A]">Measurements and findings in this prototype are manually recorded or demo data. This document is not a certified structural report.</p>
+                </> : <p className="text-sm text-[#A7A39A]">No building is available for a report.</p>}
+              </div>
+            </div>
+          )}
+
+          {currentScreen === 'audit-log' && (
+            <div className="max-w-5xl mx-auto space-y-5">
+              <div>
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Audit History</h1>
+                <p className="mt-1 text-sm text-[#A7A39A]">Recent actions recorded in this browser, newest first. This prototype log is editable browser data and is not a tamper-proof compliance audit.</p>
+              </div>
+              <div className="space-y-2">
+                {auditLog.map(item => (
+                  <article key={item.id} className="p-4 bg-[#191919] border border-[#222222] rounded flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2 className="text-xs font-bold text-[#F5F0E5]">{item.action} <span className="text-[#A7A39A]">· {item.entity}</span></h2>
+                      <p className="mt-1 text-xs text-[#A7A39A] break-words">{item.details}</p>
+                      <p className="mt-1 text-[10px] text-[#77736B]">Record: {item.entityId} · By {item.actor}</p>
+                    </div>
+                    <time className="shrink-0 text-[10px] text-[#A7A39A]">{formatRecordDate(item.timestamp)}</time>
+                  </article>
+                ))}
+                {auditLog.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No actions have been recorded yet.</p>}
               </div>
             </div>
           )}
 
           {currentScreen === 'settings' && (
             <div className="max-w-2xl mx-auto space-y-6">
-              <h1 className="text-2xl font-bold text-[#F5F0E5]">Account Settings & Preferences</h1>
-              <div className="p-6 bg-[#191919] border border-[#222222] rounded flex items-center justify-between">
-                <div>
-                  <h4 className="text-xs font-bold text-[#F5F0E5]">Reset Demo Telemetry</h4>
-                  <p className="text-[11px] text-[#A7A39A]">Restore initial Australian preloaded buildings and map pins.</p>
-                </div>
-                <button onClick={resetDemoData} className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 text-xs rounded">Reset Data</button>
+              <div>
+                <h1 className="text-2xl font-bold text-[#F5F0E5]">Account Settings & Preferences</h1>
+                <p className="mt-1 text-xs text-[#A7A39A]">{organizationName || 'Local demo workspace'}</p>
               </div>
+              <section className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+                <h2 className="font-bold text-sm text-[#F5F0E5]">Signed-in account & access</h2>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="p-3 bg-[#090909] rounded"><span className="block text-[#A7A39A]">Account</span>{isDemoSession ? 'Local demo account' : currentUser?.email || 'Not signed in'}</div>
+                  <div className="p-3 bg-[#090909] rounded"><span className="block text-[#A7A39A]">Organization role</span>{isDemoSession ? 'Demo administrator' : currentUser?.role.replaceAll('_', ' ') || 'Viewer'}</div>
+                </div>
+                <div className="space-y-2 text-xs text-[#A7A39A]">
+                  <p>Administrator: manage portfolio and all records.</p>
+                  <p>Structural engineer / inspector: create inspection records and follow-up tasks.</p>
+                  <p>Viewer: read-only access.</p>
+                </div>
+                <p className="text-[11px] text-amber-200">Organization roles are stored in Supabase memberships. Client-side checks are only for user experience; Row Level Security and the organization migration enforce data access.</p>
+              </section>
+              {!isDemoSession && (
+                <section className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+                  <h2 className="font-bold text-sm text-[#F5F0E5]">Account security</h2>
+                  <form onSubmit={event => void handleEmailUpdate(event)} className="flex flex-col sm:flex-row gap-2">
+                    <input type="email" required value={newAccountEmail} onChange={event => setNewAccountEmail(event.target.value)} className="flex-1 px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="New account email" />
+                    <button type="submit" className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Change email</button>
+                  </form>
+                  {emailUpdateNotice && <p role="status" className="text-xs text-[#A7A39A]">{emailUpdateNotice}</p>}
+                  <p className="text-xs text-[#A7A39A]">To reset your password, sign out and use “Forgot password?” on the sign-in screen.</p>
+                </section>
+              )}
+              {currentUser?.role === 'administrator' && !isDemoSession && (
+                <section className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+                  <h2 className="font-bold text-sm text-[#F5F0E5]">Invite an organization member</h2>
+                  <p className="text-xs text-[#A7A39A]">A single-use token is created for the selected email. Copy it to the invited person through a trusted channel; this app does not send invitation email.</p>
+                  <form onSubmit={event => void handleCreateInvite(event)} className="grid sm:grid-cols-3 gap-3">
+                    <input type="email" required value={inviteEmail} onChange={event => setInviteEmail(event.target.value)} className="sm:col-span-2 px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="person@example.com" />
+                    <select value={inviteRole} onChange={event => setInviteRole(event.target.value as Exclude<UserRole, 'administrator'>)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                      <option value="viewer">Viewer</option><option value="inspector">Inspector</option><option value="structural_engineer">Structural engineer</option>
+                    </select>
+                    <button type="submit" disabled={inviteBusy} className="sm:col-span-3 px-4 py-2 bg-[#E5C77B] disabled:opacity-50 text-xs font-semibold text-[#090909] rounded">{inviteBusy ? 'Creating invitation…' : 'Create invitation token'}</button>
+                  </form>
+                  {inviteError && <p role="alert" className="text-xs text-red-300">{inviteError}</p>}
+                  {generatedInvite && <label className="block text-xs text-[#A7A39A]">Share this token with {inviteEmail} (expires in 7 days)
+                    <textarea readOnly rows={3} value={generatedInvite} className="mt-2 w-full p-3 bg-[#090909] border border-[#222222] rounded text-xs text-[#E5C77B] font-mono" />
+                  </label>}
+                </section>
+              )}
+              <section className="p-6 bg-[#191919] border border-[#222222] rounded space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-bold text-sm text-[#F5F0E5]">Task notifications</h2>
+                    <p className="mt-1 text-xs text-[#A7A39A]">Browser notifications work only while the app is open. In-app due reminders are always available.</p>
+                  </div>
+                  <button onClick={() => void requestBrowserNotifications()} disabled={browserNotificationPermission === 'unsupported'} className="px-3 py-2 bg-[#222222] disabled:opacity-50 text-xs text-[#E5C77B] rounded">
+                    {browserNotificationPermission === 'granted' ? 'Notifications enabled' : browserNotificationPermission === 'denied' ? 'Blocked in browser' : browserNotificationPermission === 'unsupported' ? 'Not supported' : 'Enable browser notifications'}
+                  </button>
+                </div>
+              </section>
+              <section className="p-6 bg-[#191919] border border-[#222222] rounded space-y-4">
+                <div>
+                  <h2 className="font-bold text-sm text-[#F5F0E5]">Reusable inspection checklists</h2>
+                  <p className="mt-1 text-xs text-[#A7A39A]">Templates are stored in this browser and included in new local inspection records.</p>
+                </div>
+                <div className="space-y-2">
+                  {checklistTemplates.map(template => (
+                    <div key={template.id} className="flex items-center justify-between gap-3 p-3 bg-[#090909] rounded">
+                      <div><p className="text-xs font-medium text-[#F5F0E5]">{template.name}</p><p className="text-[10px] text-[#A7A39A]">{template.component} · {template.items.length} items</p></div>
+                      <button onClick={() => handleDeleteChecklist(template)} disabled={checklistTemplates.length <= 1} aria-label={`Delete ${template.name}`} className="p-2 text-red-300 disabled:opacity-30"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                  ))}
+                </div>
+                <form onSubmit={handleAddChecklist} className="space-y-3 border-t border-[#222222] pt-4">
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <input required value={checklistNameInput} onChange={event => setChecklistNameInput(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="Template name" />
+                    <select value={checklistComponentInput} onChange={event => setChecklistComponentInput(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                      {['All', 'Walls', 'Columns', 'Beams', 'Ceilings', 'Pillars', 'Floors', 'Foundations', 'Other'].map(component => <option key={component}>{component}</option>)}
+                    </select>
+                  </div>
+                  <textarea required rows={4} value={checklistItemsInput} onChange={event => setChecklistItemsInput(event.target.value)} className="w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder={'One checklist item per line'} />
+                  {checklistError && <p role="alert" className="text-xs text-red-300">{checklistError}</p>}
+                  <button type="submit" className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Save checklist template</button>
+                </form>
+              </section>
+              {isDemoSession && (
+                <div className="p-6 bg-[#191919] border border-[#222222] rounded flex items-center justify-between gap-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-[#F5F0E5]">Reset Demo Data</h4>
+                    <p className="text-[11px] text-[#A7A39A]">Restore the preloaded buildings, alerts, and inspection records. Tasks are removed too.</p>
+                  </div>
+                  <button onClick={resetDemoData} className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 text-xs rounded">Reset Data</button>
+                </div>
+              )}
             </div>
           )}
         </main>

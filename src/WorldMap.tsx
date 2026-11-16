@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import 'leaflet.markercluster';
+import 'leaflet.markercluster/dist/MarkerCluster.css';
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import { Cpu, Globe, Layers, Maximize2, MapPin, X } from 'lucide-react';
 
 // Only the fields the map needs. Your Building type from App.tsx fits this shape.
@@ -10,7 +13,7 @@ export type MapBuilding = {
   location: string;
   type: string;
   status: 'Low Concern' | 'Inspection Recommended' | 'Monitoring Required' | 'Urgent Assessment';
-  healthIndex: number;
+  healthIndex?: number;
   lastScanDate: string;
   lat?: number;
   lng?: number;
@@ -22,6 +25,8 @@ type WorldMapProps = {
   buildings: MapBuilding[];
   onScan: (buildingId: string) => void;
   onMemory: (buildingId: string) => void;
+  canScan?: boolean;
+  selectedBuildingId?: string;
 };
 
 const STATUS_COLORS: Record<Status, string> = {
@@ -55,19 +60,23 @@ const MAP_CSS = `
     border-radius: 4px; font-size: 11px; box-shadow: none;
   }
   .archonix-tooltip.leaflet-tooltip-top:before { border-top-color: #B58B3B; }
+  .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background-color: rgb(181 139 59 / 35%) !important; }
+  .marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div {
+    background-color: #E5C77B; color: #090909; font: 700 12px/30px monospace;
+  }
   @media (prefers-reduced-motion: reduce) {
     .archonix-pin__dot--urgent { animation: none; }
     .archonix-pin__dot { transition: none; }
   }
 `;
 
-export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps) {
+export default function WorldMap({ buildings, onScan, onMemory, canScan = true, selectedBuildingId }: WorldMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const layerRef = useRef<L.LayerGroup | null>(null);
+  const layerRef = useRef<L.MarkerClusterGroup | null>(null);
   const markersRef = useRef<Map<string, L.Marker>>(new Map());
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(selectedBuildingId ?? null);
   const [activeStatuses, setActiveStatuses] = useState<Set<Status>>(new Set(ALL_STATUSES));
 
   const plotted = useMemo(
@@ -87,20 +96,25 @@ export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps)
     if (!container || mapRef.current) return;
 
     const map = L.map(container, {
-      center: [20, 10],
-      zoom: 2,
+      center: [-33.8688, 151.2093], // Centered on Sydney/NSW focus
+      zoom: 6,
       minZoom: 2,
       worldCopyJump: true,
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    // Integrated CARTO dark-mode basemap tiles with your production API key
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_59bg_1_bbd7a5d128b236d4ca79c665', {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
       subdomains: 'abcd',
       maxZoom: 19,
     }).addTo(map);
 
-    layerRef.current = L.layerGroup().addTo(map);
+    layerRef.current = L.markerClusterGroup({
+      chunkedLoading: true,
+      maxClusterRadius: 50,
+      showCoverageOnHover: false,
+    }).addTo(map);
     mapRef.current = map;
 
     // Keep tiles correct when the sidebar opens/closes or the window resizes.
@@ -145,8 +159,6 @@ export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps)
 
       marker.on('click', () => {
         setSelectedId(b.id);
-        const map = mapRef.current;
-        if (map) map.flyTo([lat, lng], Math.max(map.getZoom(), 6), { duration: 1.2 });
       });
 
       marker.addTo(layer);
@@ -159,6 +171,13 @@ export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps)
     markersRef.current.forEach((marker, id) => {
       marker.getElement()?.classList.toggle('archonix-pin--selected', id === selectedId);
     });
+  }, [selectedId, visible]);
+
+  useEffect(() => {
+    const building = visible.find(item => item.id === selectedId);
+    if (!building) return;
+    const map = mapRef.current;
+    if (map) map.flyTo([building.lat as number, building.lng as number], Math.max(map.getZoom(), 6), { duration: 1.2 });
   }, [selectedId, visible]);
 
   const focusBuilding = (b: MapBuilding) => {
@@ -279,7 +298,7 @@ export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps)
               <div className="grid grid-cols-3 gap-2 p-3 bg-[#222222]/50 rounded font-mono text-xs">
                 <div>
                   <span className="text-[#A7A39A] block text-[10px]">Health</span>
-                  <span className="text-[#E5C77B] font-bold">{selected.healthIndex}%</span>
+                  <span className="text-[#E5C77B] font-bold">{selected.healthIndex != null ? `${selected.healthIndex}%` : 'Not available'}</span>
                 </div>
                 <div>
                   <span className="text-[#A7A39A] block text-[10px]">Type</span>
@@ -292,14 +311,14 @@ export default function WorldMap({ buildings, onScan, onMemory }: WorldMapProps)
               </div>
 
               <div className="flex items-center gap-2">
-                <button
+                {canScan && <button
                   type="button"
                   onClick={() => onScan(selected.id)}
                   className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Cpu className="w-3.5 h-3.5" />
-                  <span>Run AI Scan</span>
-                </button>
+                  <span>Record Inspection</span>
+                </button>}
                 <button
                   type="button"
                   onClick={() => onMemory(selected.id)}
