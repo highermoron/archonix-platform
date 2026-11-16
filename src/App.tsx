@@ -220,7 +220,7 @@ function parseCsv(source: string): string[][] {
   return rows;
 }
 
-// --- INITIAL DEMO DATA (AUSTRALIAN CONTEXT WITH COORDINATES) ---
+// --- INITIAL GLOBAL DEMO DATA WITH REPRESENTATIVE COORDINATES ---
 const INITIAL_BUILDINGS: Building[] = [
   {
     id: 'bld-001',
@@ -269,6 +269,105 @@ const INITIAL_BUILDINGS: Building[] = [
     lastScanDate: '15 September 2026',
     imageUrl: 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=1200&q=80',
     incidentNote: 'Expansion joint settlement recorded in Bay 4 loading dock.'
+  },
+  {
+    id: 'bld-world-001',
+    name: 'The Shard (Demo)',
+    location: 'London, United Kingdom',
+    lat: 51.5045,
+    lng: -0.0865,
+    type: 'Commercial',
+    year: 2013,
+    floors: 72,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-002',
+    name: 'Empire State Building (Demo)',
+    location: 'New York, United States',
+    lat: 40.7484,
+    lng: -73.9857,
+    type: 'Commercial',
+    year: 1931,
+    floors: 102,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-003',
+    name: 'Eiffel Tower (Demo)',
+    location: 'Paris, France',
+    lat: 48.8584,
+    lng: 2.2945,
+    type: 'Other',
+    year: 1889,
+    floors: 3,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-004',
+    name: 'Burj Khalifa (Demo)',
+    location: 'Dubai, United Arab Emirates',
+    lat: 25.1972,
+    lng: 55.2744,
+    type: 'Commercial',
+    year: 2010,
+    floors: 163,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-005',
+    name: 'Marina Bay Sands (Demo)',
+    location: 'Singapore',
+    lat: 1.2834,
+    lng: 103.8607,
+    type: 'Commercial',
+    year: 2010,
+    floors: 57,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-006',
+    name: 'Tokyo Tower (Demo)',
+    location: 'Tokyo, Japan',
+    lat: 35.6586,
+    lng: 139.7454,
+    type: 'Other',
+    year: 1958,
+    floors: 5,
+    description: 'Illustrative global demo pin only. Verify this asset and its coordinates before operational use; no condition assessment is represented.',
+    status: 'Monitoring Required',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80'
+  },
+  {
+    id: 'bld-world-007',
+    name: 'DCM YES School (Assessment Requested)',
+    location: 'Block-B, Rajguru Nagar, Ludhiana, Punjab 141012, India',
+    lat: 30.87818,
+    lng: 75.782954,
+    type: 'Institutional',
+    year: 0,
+    floors: 0,
+    description: 'Urgent assessment requested by the user. No on-site inspection or structural findings are recorded; construction year and floor count are unverified.',
+    status: 'Urgent Assessment',
+    lastScanDate: 'Not scanned',
+    imageUrl: 'https://images.unsplash.com/photo-1541888946425-d0fbb18fefec?auto=format&fit=crop&w=1200&q=80',
+    incidentNote: 'User-requested urgent assessment designation; no inspection findings recorded.'
   }
 ];
 
@@ -612,7 +711,20 @@ export default function App() {
         [DEFAULT_CHECKLIST]
       );
       const loadedChecklists = savedChecklists.length > 0 ? savedChecklists : [DEFAULT_CHECKLIST];
-      setBuildings(readWorkspaceJson('archonix_buildings_au_v2', scope, demoScope ? INITIAL_BUILDINGS : []));
+      const savedBuildings = readWorkspaceJson<Building[]>(
+        'archonix_buildings_au_v2',
+        scope,
+        demoScope ? INITIAL_BUILDINGS : []
+      );
+      const loadedBuildings = demoScope
+        ? [
+            ...savedBuildings,
+            ...INITIAL_BUILDINGS.filter(initial =>
+              !savedBuildings.some(saved => saved.id === initial.id)
+            )
+          ]
+        : savedBuildings;
+      setBuildings(loadedBuildings);
       setAlerts(readWorkspaceJson('archonix_alerts_au_v2', scope, demoScope ? INITIAL_ALERTS : []));
       setScans(readWorkspaceJson('archonix_scans_au_v2', scope, demoScope ? INITIAL_SCANS : []));
       setWorkOrders(readWorkspaceJson('archonix_work_orders_au_v1', scope, []));
@@ -1624,7 +1736,7 @@ export default function App() {
               </div>
               <div>
                 <span className="font-bold tracking-widest text-lg text-[#F5F0E5]">ARCHONIX</span>
-                <span className="block text-xs text-[#B58B3B] font-mono tracking-wider">AUSTRALIAN ENTERPRISE TELEMETRY</span>
+                <span className="block text-xs text-[#B58B3B] font-mono tracking-wider">WORLD ENTERPRISE TELEMETRY</span>
               </div>
             </div>
             <h1 className="text-4xl lg:text-5xl font-bold tracking-tight text-[#F5F0E5] mb-6">
@@ -1652,7 +1764,7 @@ export default function App() {
             </div>
           </div>
           <div className="relative z-10 mt-8 text-xs text-[#A7A39A]">
-            © 2026 ARCHONIX Structural Intelligence Systems • Sydney & Melbourne Operations
+            © 2026 ARCHONIX World Enterprise Telemetry • Global Operations
           </div>
         </div>
 
@@ -1885,7 +1997,7 @@ export default function App() {
             </div>
             <div>
               <span className="font-bold tracking-wider text-sm text-[#F5F0E5]">ARCHONIX</span>
-              <span className="block text-[10px] text-[#B58B3B] font-mono">AUSTRALIA</span>
+              <span className="block text-[10px] text-[#B58B3B] font-mono">WORLD</span>
             </div>
           </div>
           <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-[#A7A39A] hover:text-[#F5F0E5]">
