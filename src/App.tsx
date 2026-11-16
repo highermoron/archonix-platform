@@ -1203,8 +1203,8 @@ export default function App() {
       id: makeLocalId('bld'),
       name: newBuilding.name,
       location: newBuilding.location,
-      lat: Number(newBuilding.lat) || -33.8688,
-      lng: Number(newBuilding.lng) || 151.2093,
+      lat: Number(newBuilding.lat),
+      lng: Number(newBuilding.lng),
       type: newBuilding.type,
       year: Number(newBuilding.year),
       floors: Number(newBuilding.floors),
@@ -1997,10 +1997,13 @@ export default function App() {
           {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some changes could not be saved in this browser: {storageError}. Export or copy important records before leaving.</div>}
           {currentScreen === 'map' && (
             <WorldMap
-              key={selectedBuildingId}
               buildings={activeBuildings}
               canScan={canEdit}
-              selectedBuildingId={selectedBuildingId}
+              selectedBuildingId={activeSelectedBuildingId || undefined}
+              onSelectBuilding={(building) => setSelectedBuildingId(building.id)}
+              onMapClick={canManageBuildings ? (lat, lng) => {
+                setNewBuilding(current => ({ ...current, lat, lng }));
+              } : undefined}
               onScan={(id) => {
                 if (!canEdit) return;
                 setSelectedBuildingId(id);

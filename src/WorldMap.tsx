@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet.markercluster';
@@ -27,6 +27,8 @@ type WorldMapProps = {
   onMemory: (buildingId: string) => void;
   canScan?: boolean;
   selectedBuildingId?: string;
+  onSelectBuilding?: (building: MapBuilding) => void;
+  onMapClick?: (lat: number, lng: number) => void;
 };
 
 const STATUS_COLORS: Record<Status, string> = {
@@ -70,17 +72,41 @@ const MAP_CSS = `
   }
 `;
 
-export default function WorldMap({ buildings, onScan, onMemory, canScan = true, selectedBuildingId }: WorldMapProps) {
+export default function WorldMap({
+  buildings,
+  onScan,
+  onMemory,
+  canScan = true,
+  selectedBuildingId,
+  onSelectBuilding,
+  onMapClick,
+}: WorldMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.MarkerClusterGroup | null>(null);
   const markersRef = useRef<Map<string, L.Marker>>(new Map());
+  const onMapClickRef = useRef(onMapClick);
+  const onSelectBuildingRef = useRef(onSelectBuilding);
+  const previousSelectedIdRef = useRef<string | null>(selectedBuildingId ?? null);
 
-  const [selectedId, setSelectedId] = useState<string | null>(selectedBuildingId ?? null);
+  const [selection, setSelection] = useState({
+    propId: selectedBuildingId ?? null,
+    id: selectedBuildingId ?? null,
+  });
+  const selectedId = selection.propId === (selectedBuildingId ?? null)
+    ? selection.id
+    : selectedBuildingId ?? null;
+  const setSelectedId = useCallback((id: string | null) => {
+    setSelection({ propId: selectedBuildingId ?? null, id });
+  }, [selectedBuildingId]);
+  const [pickedCoordinates, setPickedCoordinates] = useState<L.LatLngTuple | null>(null);
   const [activeStatuses, setActiveStatuses] = useState<Set<Status>>(new Set(ALL_STATUSES));
 
   const plotted = useMemo(
-    () => buildings.filter((b) => typeof b.lat === 'number' && typeof b.lng === 'number'),
+    () => buildings.filter((b) =>
+      typeof b.lat === 'number' && Number.isFinite(b.lat) && b.lat >= -90 && b.lat <= 90
+      && typeof b.lng === 'number' && Number.isFinite(b.lng) && b.lng >= -180 && b.lng <= 180
+    ),
     [buildings]
   );
   const visible = useMemo(
@@ -90,25 +116,43 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
   const selected = visible.find((b) => b.id === selectedId) ?? null;
   const unplottedCount = buildings.length - plotted.length;
 
+  useEffect(() => {
+    onMapClickRef.current = onMapClick;
+  }, [onMapClick]);
+
+  useEffect(() => {
+    onSelectBuildingRef.current = onSelectBuilding;
+  }, [onSelectBuilding]);
+
   // Create the map once.
   useEffect(() => {
     const container = containerRef.current;
     if (!container || mapRef.current) return;
+    const markers = markersRef.current;
 
     const map = L.map(container, {
-      center: [-33.8688, 151.2093], // Centered on Sydney/NSW focus
-      zoom: 6,
+      center: [20, 0],
+      zoom: 2,
       minZoom: 2,
       worldCopyJump: true,
     });
 
-    // Integrated CARTO dark-mode basemap tiles with your production API key
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_59bg_1_bbd7a5d128b236d4ca79c665', {
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
       subdomains: 'abcd',
       maxZoom: 19,
     }).addTo(map);
+
+    map.on('click', (event: L.LeafletMouseEvent) => {
+      const target = event.originalEvent.target;
+      if (target instanceof Element && target.closest('.leaflet-marker-icon, .leaflet-popup')) return;
+
+      const lat = Number(event.latlng.lat.toFixed(6));
+      const lng = Number(event.latlng.lng.toFixed(6));
+      setPickedCoordinates([lat, lng]);
+      onMapClickRef.current?.(lat, lng);
+    });
 
     layerRef.current = L.markerClusterGroup({
       chunkedLoading: true,
@@ -125,10 +169,20 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
       observer.disconnect();
       map.remove();
       mapRef.current = null;
-      layerRef.current = null;
-      markersRef.current.clear();
+      markers.clear();
     };
   }, []);
+
+  // Show the whole portfolio on the initial view and whenever its coordinates change.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || plotted.length === 0) return;
+
+    const bounds = L.latLngBounds(
+      plotted.map((building) => [building.lat as number, building.lng as number] as L.LatLngTuple)
+    );
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 12 });
+  }, [plotted]);
 
   // Draw one pin per visible building.
   useEffect(() => {
@@ -159,12 +213,13 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
 
       marker.on('click', () => {
         setSelectedId(b.id);
+        onSelectBuildingRef.current?.(b);
       });
 
       marker.addTo(layer);
       markersRef.current.set(b.id, marker);
     });
-  }, [visible]);
+  }, [visible, setSelectedId]);
 
   // Highlight the selected pin.
   useEffect(() => {
@@ -174,6 +229,9 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
   }, [selectedId, visible]);
 
   useEffect(() => {
+    if (previousSelectedIdRef.current === selectedId) return;
+    previousSelectedIdRef.current = selectedId;
+
     const building = visible.find(item => item.id === selectedId);
     if (!building) return;
     const map = mapRef.current;
@@ -182,6 +240,7 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
 
   const focusBuilding = (b: MapBuilding) => {
     setSelectedId(b.id);
+    onSelectBuildingRef.current?.(b);
     const map = mapRef.current;
     if (map) map.flyTo([b.lat as number, b.lng as number], Math.max(map.getZoom(), 6), { duration: 1.2 });
   };
@@ -214,6 +273,14 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
 
       {/* Filters and view controls */}
       <div className="flex flex-wrap items-center gap-2">
+        <p className="w-full text-xs text-[#A7A39A]" role="status">
+          Click anywhere on the map to set coordinates for a new building.
+          {pickedCoordinates && (
+            <span className="ml-1 font-mono text-[#E5C77B]">
+              Selected: {pickedCoordinates[0]}, {pickedCoordinates[1]}
+            </span>
+          )}
+        </p>
         {ALL_STATUSES.map((status) => {
           const on = activeStatuses.has(status);
           return (
@@ -260,7 +327,7 @@ export default function WorldMap({ buildings, onScan, onMemory, canScan = true, 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {/* Map */}
         <div className="lg:col-span-3 relative isolate rounded border border-[#222222] overflow-hidden bg-[#0d0d0d]">
-          <div ref={containerRef} className="h-[60vh] min-h-[420px] w-full" />
+          <div ref={containerRef} className="h-[60vh] min-h-[420px] w-full cursor-crosshair" />
 
           {visible.length === 0 && (
             <div className="absolute inset-0 z-[500] flex items-center justify-center pointer-events-none">
