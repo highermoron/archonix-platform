@@ -7,10 +7,10 @@ import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { 
   Building2, ShieldAlert, Cpu, Activity, FileText, Settings, 
   Bell, Plus, Upload, ArrowRight, Eye,
-  LogOut, Lock, Mail, Menu, X, Zap, Layers,
+  LogOut, Lock, Mail, Menu, X, Zap,
   Compass, Download, MapPin, Search, ClipboardCheck, Clock, Users,
   CheckCircle, CircleAlert, History, Trash2, FileUp, CalendarClock,
-  Radio, Wind, Waves, Play, Pause, RotateCcw, Sparkles
+  Radio, Sparkles
 } from 'lucide-react';
 import TelemetryPanel from './components/TelemetryPanel';
 import { 

@@ -433,9 +433,10 @@ export function executeSimulation(
 export function subscribeToSupabaseTelemetry(
   onReadingReceived: (reading: { building_id: string; sensor_type: string; value: number }) => void
 ) {
-  if (!supabase) return () => {};
+  const client = supabase;
+  if (!client) return () => {};
 
-  const channel = supabase
+  const channel = client
     .channel('archonix_telemetry_live')
     .on(
       'postgres_changes',
@@ -449,6 +450,6 @@ export function subscribeToSupabaseTelemetry(
     .subscribe();
 
   return () => {
-    supabase.removeChannel(channel);
+    client.removeChannel(channel);
   };
 }

@@ -1,6 +1,5 @@
-import React from 'react';
 import type { BuildingTelemetry, SensorReading, TelemetryStatus, SimulationPreset } from '../types/telemetry';
-import { Activity, Compass, Cpu, Droplets, Zap, AlertTriangle, ShieldAlert, Play, Pause, RotateCcw, Wind, Waves } from 'lucide-react';
+import { Activity, Compass, Cpu, Droplets, Zap, AlertTriangle, Play, Pause, RotateCcw, Wind, Waves } from 'lucide-react';
 
 interface TelemetryPanelProps {
   telemetry: BuildingTelemetry;

@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { CornerDownLeft, Sparkles, Terminal, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { CornerDownLeft, Sparkles, X, ChevronDown, ChevronUp } from 'lucide-react';
 import type { BuildingTelemetry } from '../../types/telemetry';
 import type { SpatialAIResult, SpatialBuilding, StructuralFinding } from '../../lib/spatialAI';
 import { buildStructuralFindings } from '../../lib/spatial/defects';
