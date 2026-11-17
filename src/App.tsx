@@ -9,8 +9,18 @@ import {
   Bell, Plus, Upload, ArrowRight, Eye,
   LogOut, Lock, Mail, Menu, X, Zap, Layers,
   Compass, Download, MapPin, Search, ClipboardCheck, Clock, Users,
-  CheckCircle, CircleAlert, History, Trash2, FileUp, CalendarClock
+  CheckCircle, CircleAlert, History, Trash2, FileUp, CalendarClock,
+  Radio, Wind, Waves, Play, Pause, RotateCcw, Sparkles
 } from 'lucide-react';
+import TelemetryPanel from './components/TelemetryPanel';
+import { 
+  createDefaultBuildingTelemetry, 
+  generateInitialTelemetry, 
+  tickTelemetry, 
+  executeSimulation, 
+  subscribeToSupabaseTelemetry 
+} from './lib/telemetryService';
+import type { BuildingTelemetry, SimulationPreset } from './types/telemetry';
 
 // --- TYPES ---
 type Screen = 
@@ -480,28 +490,45 @@ function dateAfterDays(days: number) {
 function persistJson(key: string, value: unknown): string | null {
   try {
     localStorage.setItem(key, JSON.stringify(value));
-    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: null } }));
+    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: null, operation: 'write' } }));
     return null;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown browser storage error';
     console.error(`Could not persist ${key}:`, message);
-    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: message } }));
+    window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error: message, operation: 'write' } }));
     return message;
   }
 }
 
 function reportStorageError(key: string, error: string) {
   console.error(`Could not read ${key}:`, error);
-  window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error } }));
+  window.dispatchEvent(new CustomEvent('archonix:storage', { detail: { key, error, operation: 'read' } }));
 }
 
 function workspaceStorageKey(key: string, scope: string) {
   return scope === 'demo' ? key : `${key}_${scope}`;
 }
 
+function readStoredJson<T>(
+  key: string,
+  fallback: T,
+  onError: (key: string, message: string) => void = reportStorageError
+): T {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+
+    const parsed: unknown = JSON.parse(saved);
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) throw new Error('Saved data is not a list.');
+    return parsed as T;
+  } catch (error) {
+    onError(key, error instanceof Error ? error.message : 'Invalid saved data.');
+    return fallback;
+  }
+}
+
 function readWorkspaceJson<T>(key: string, scope: string, fallback: T): T {
-  const saved = localStorage.getItem(workspaceStorageKey(key, scope));
-  return saved ? JSON.parse(saved) as T : fallback;
+  return readStoredJson(workspaceStorageKey(key, scope), fallback);
 }
 
 function statusForConcern(concern: ScanRecord['concernLevel']): Building['status'] {
@@ -535,7 +562,6 @@ export default function App() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
   const [passwordConfirmInput, setPasswordConfirmInput] = useState('');
-  const [storageError, setStorageError] = useState<string | null>(null);
   const [todayDate, setTodayDate] = useState(currentLocalDate);
   const [reportGeneratedDate] = useState(() => new Date().toLocaleDateString());
   const [currentUser, setCurrentUser] = useState<{ id: string; email: string; name: string; role: UserRole } | null>(null);
@@ -562,12 +588,28 @@ export default function App() {
   const [inviteBusy, setInviteBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const { buildings: supabaseBuildings, loading: buildingsLoading, error: buildingsError } = useSupabaseBuildings();
+  const [initialLocalData] = useState(() => {
+    const errors: string[] = [];
+    const collectError = (key: string, message: string) => {
+      console.error(`Could not read ${key}:`, message);
+      errors.push(`Could not read ${key}: ${message}`);
+    };
 
-  const [buildings, setBuildings] = useState<Building[]>(() => {
-    const saved = localStorage.getItem('archonix_buildings_au_v2');
-    return saved ? JSON.parse(saved) : INITIAL_BUILDINGS;
+    return {
+      buildings: readStoredJson('archonix_buildings_au_v2', INITIAL_BUILDINGS, collectError),
+      alerts: readStoredJson('archonix_alerts_au_v2', INITIAL_ALERTS, collectError),
+      scans: readStoredJson('archonix_scans_au_v2', INITIAL_SCANS, collectError),
+      workOrders: readStoredJson('archonix_work_orders_au_v1', [], collectError),
+      checklistTemplates: readStoredJson('archonix_checklist_templates_v1', [DEFAULT_CHECKLIST], collectError),
+      auditLog: readStoredJson('archonix_audit_log_v1', [], collectError),
+      errors
+    };
   });
+  const [storageError, setStorageError] = useState<string | null>(() =>
+    initialLocalData.errors.length > 0 ? initialLocalData.errors.join('; ') : null
+  );
 
+  const [buildings, setBuildings] = useState<Building[]>(initialLocalData.buildings);
   const activeBuildings = useMemo(() => {
     if (supabaseBuildings.length === 0) {
       if (isDemoSession && buildings.length === 0) return INITIAL_BUILDINGS;
@@ -620,19 +662,10 @@ export default function App() {
     return [...remoteBuildings, ...localAdditions];
   }, [buildings, supabaseBuildings, isDemoSession]);
 
-  const [alerts, setAlerts] = useState<AlertItem[]>(() => {
-    const saved = localStorage.getItem('archonix_alerts_au_v2');
-    return saved ? JSON.parse(saved) : INITIAL_ALERTS;
-  });
+  const [alerts, setAlerts] = useState<AlertItem[]>(initialLocalData.alerts);
 
-  const [scans, setScans] = useState<ScanRecord[]>(() => {
-    const saved = localStorage.getItem('archonix_scans_au_v2');
-    return saved ? JSON.parse(saved) : INITIAL_SCANS;
-  });
-  const [workOrders, setWorkOrders] = useState<WorkOrder[]>(() => {
-    const saved = localStorage.getItem('archonix_work_orders_au_v1');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [scans, setScans] = useState<ScanRecord[]>(initialLocalData.scans);
+  const [workOrders, setWorkOrders] = useState<WorkOrder[]>(initialLocalData.workOrders);
 
   const [selectedBuildingId, setSelectedBuildingId] = useState<string>('bld-002');
   const activeSelectedBuildingId = activeBuildings.some(building => building.id === selectedBuildingId)
@@ -660,20 +693,14 @@ export default function App() {
   const [workOrderAssignee, setWorkOrderAssignee] = useState('');
   const [workOrderDueDate, setWorkOrderDueDate] = useState('');
   const [workOrderError, setWorkOrderError] = useState<string | null>(null);
-  const [checklistTemplates, setChecklistTemplates] = useState<ChecklistTemplate[]>(() => {
-    const saved = localStorage.getItem('archonix_checklist_templates_v1');
-    return saved ? JSON.parse(saved) as ChecklistTemplate[] : [DEFAULT_CHECKLIST];
-  });
+  const [checklistTemplates, setChecklistTemplates] = useState<ChecklistTemplate[]>(initialLocalData.checklistTemplates);
   const [selectedChecklistId, setSelectedChecklistId] = useState(DEFAULT_CHECKLIST.id);
   const [checklistResponses, setChecklistResponses] = useState<Record<string, boolean>>({});
   const [checklistNameInput, setChecklistNameInput] = useState('');
   const [checklistComponentInput, setChecklistComponentInput] = useState('All');
   const [checklistItemsInput, setChecklistItemsInput] = useState('');
   const [checklistError, setChecklistError] = useState<string | null>(null);
-  const [auditLog, setAuditLog] = useState<AuditEvent[]>(() => {
-    const saved = localStorage.getItem('archonix_audit_log_v1');
-    return saved ? JSON.parse(saved) as AuditEvent[] : [];
-  });
+  const [auditLog, setAuditLog] = useState<AuditEvent[]>(initialLocalData.auditLog);
   const [reviewNote, setReviewNote] = useState('');
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [buildingCsvPreview, setBuildingCsvPreview] = useState<CsvImportRow[]>([]);
@@ -690,10 +717,83 @@ export default function App() {
 
   const [newBuilding, setNewBuilding] = useState(DEFAULT_NEW_BUILDING);
 
+  // --- LIVE IOT STRUCTURAL HEALTH TELEMETRY STATE ---
+  const [telemetryMap, setTelemetryMap] = useState<Record<string, BuildingTelemetry>>(() =>
+    generateInitialTelemetry(INITIAL_BUILDINGS)
+  );
+  const [isTelemetryStreaming, setIsTelemetryStreaming] = useState<boolean>(true);
+  const [monitorActiveTab, setMonitorActiveTab] = useState<'telemetry' | 'memory'>('telemetry');
+
+  // Synchronize telemetryMap whenever activeBuildings changes
+  useEffect(() => {
+    setTelemetryMap(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const bld of activeBuildings) {
+        if (!next[bld.id]) {
+          next[bld.id] = createDefaultBuildingTelemetry(bld.id, bld.name);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeBuildings]);
+
+  // Live telemetry ticker loop: simulates real-time micro-fluctuations every 2.5s
+  useEffect(() => {
+    if (!isTelemetryStreaming) return;
+    const interval = window.setInterval(() => {
+      setTelemetryMap(prev => tickTelemetry(prev));
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [isTelemetryStreaming]);
+
+  // Optional Supabase Realtime Telemetry Subscription
+  useEffect(() => {
+    const unsubscribe = subscribeToSupabaseTelemetry((reading) => {
+      setTelemetryMap(prev => {
+        const bld = prev[reading.building_id];
+        if (!bld) return prev;
+        const now = new Date().toLocaleTimeString();
+        const sensorKey = reading.sensor_type as keyof typeof bld.sensors;
+        if (!bld.sensors[sensorKey]) return prev;
+
+        const currentSensor = bld.sensors[sensorKey];
+        const val = Number(reading.value);
+        const status = val >= currentSensor.criticalThreshold ? 'critical' : val >= currentSensor.warningThreshold ? 'warning' : 'normal';
+
+        return {
+          ...prev,
+          [reading.building_id]: {
+            ...bld,
+            lastUpdated: now,
+            sensors: {
+              ...bld.sensors,
+              [sensorKey]: {
+                ...currentSensor,
+                value: val,
+                status,
+                timestamp: now,
+                history: [...currentSensor.history.slice(1), val]
+              }
+            }
+          }
+        };
+      });
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   useEffect(() => {
     const handleStorageResult = (event: Event) => {
-      const { key, error } = (event as CustomEvent<{ key: string; error: string | null }>).detail;
-      setStorageError(current => error ? `${key}: ${error}` : current?.startsWith(`${key}:`) ? null : current);
+      const { key, error, operation } = (event as CustomEvent<{
+        key: string;
+        error: string | null;
+        operation: 'read' | 'write';
+      }>).detail;
+      const errorPrefix = operation === 'read' ? `Could not read ${key}:` : `Could not save ${key}:`;
+      setStorageError(current => error ? `${errorPrefix} ${error}` : current?.startsWith(errorPrefix) ? null : current);
     };
     window.addEventListener('archonix:storage', handleStorageResult);
     return () => window.removeEventListener('archonix:storage', handleStorageResult);
@@ -919,6 +1019,36 @@ export default function App() {
       details
     };
     setAuditLog(current => [event, ...current].slice(0, 500));
+  };
+
+  const handleSimulateTelemetry = (preset: SimulationPreset, targetBuildingId?: string) => {
+    const result = executeSimulation(preset, telemetryMap, targetBuildingId);
+    setTelemetryMap(result.updatedTelemetry);
+
+    if (result.generatedAlert) {
+      const newAlert: AlertItem = {
+        id: makeLocalId('alt-iot'),
+        title: result.generatedAlert.title,
+        buildingName: result.generatedAlert.buildingName,
+        timestamp: 'Just now',
+        severity: result.generatedAlert.severity,
+        description: result.generatedAlert.description,
+        recommendation: result.generatedAlert.recommendation,
+        read: false,
+        buildingId: result.generatedAlert.buildingId,
+        source: 'demo'
+      };
+
+      setAlerts(current => [newAlert, ...current]);
+      recordAudit(
+        `IoT Telemetry Breach: ${result.generatedAlert.title}`,
+        'Telemetry',
+        result.generatedAlert.buildingId,
+        result.generatedAlert.description
+      );
+    } else if (preset === 'baseline') {
+      recordAudit('Reset IoT telemetry sensors', 'Telemetry', 'all', 'All structural health telemetry sensors reset to safe nominal baseline.');
+    }
   };
 
   const handleOrganizationSetup = async (event: React.FormEvent, mode: 'create' | 'join') => {
@@ -1742,6 +1872,10 @@ export default function App() {
     }
   }, [dueWorkOrders, browserNotificationPermission, todayDate, workspaceStorageScope, dataScopeLoaded]);
 
+  const criticalTelemetryCount = useMemo(() => {
+    return Object.values(telemetryMap).filter(t => t.overallStatus === 'critical').length;
+  }, [telemetryMap]);
+
   if (!isAuthenticated || currentScreen === 'login' || currentScreen === 'password-reset') {
     const isResettingPassword = currentScreen === 'password-reset';
     return (
@@ -1989,7 +2123,7 @@ export default function App() {
     { id: 'add-building', label: 'Add Building', icon: Plus },
     { id: 'import-buildings', label: 'Import Buildings', icon: FileUp },
     { id: 'scan', label: 'Record Inspection', icon: Cpu },
-    { id: 'monitor', label: 'Health Monitor (Memory™)', icon: Layers },
+    { id: 'monitor', label: 'IoT Telemetry & Health', icon: Radio, badge: criticalTelemetryCount > 0 ? criticalTelemetryCount : undefined },
     { id: 'review-queue', label: 'Review Queue', icon: CheckCircle, badge: reviewQueue.length },
     { id: 'alerts', label: 'Alerts & Tasks', icon: Bell, badge: alerts.filter(a => !a.read).length + dueWorkOrders.length },
     { id: 'recommendations', label: 'Follow-up Recommendations', icon: Zap },
@@ -2087,7 +2221,27 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                setMonitorActiveTab('telemetry');
+                setCurrentScreen('monitor');
+              }}
+              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#222222] hover:bg-[#333333] text-xs font-mono text-[#F5F0E5] transition-colors cursor-pointer"
+            >
+              <Radio className={`w-3.5 h-3.5 ${criticalTelemetryCount > 0 ? 'text-red-400 animate-pulse' : 'text-emerald-400'}`} />
+              <span className={criticalTelemetryCount > 0 ? 'text-red-300 font-bold' : ''}>
+                {criticalTelemetryCount > 0 ? `IOT ALERT (${criticalTelemetryCount})` : 'IOT STREAMING'}
+              </span>
+            </button>
+            <button
+              onClick={() => setCurrentScreen('map')}
+              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#B58B3B]/15 hover:bg-[#B58B3B]/25 border border-[#B58B3B]/40 text-xs font-mono text-[#E5C77B] transition-colors cursor-pointer"
+              title="Open Conversational Spatial AI (⌘K)"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[#E5C77B]" />
+              <span>Spatial AI (⌘K)</span>
+            </button>
             <button onClick={() => setCurrentScreen('map')} className="px-3 py-1.5 rounded bg-[#222222] text-[#E5C77B] hover:bg-[#333333] text-xs font-mono flex items-center gap-1.5">
               <MapPin className="w-3.5 h-3.5" />
               <span>Live GIS Map</span>
@@ -2125,10 +2279,11 @@ export default function App() {
                     : 'No buildings are assigned to this organization yet.'}
             </div>
           )}
-          {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some changes could not be saved in this browser: {storageError}. Export or copy important records before leaving.</div>}
+          {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some browser data could not be read or saved: {storageError}. Export or copy important records before leaving.</div>}
           {currentScreen === 'map' && (
             <WorldMap
               buildings={activeBuildings}
+              scans={scans}
               canScan={canEdit}
               selectedBuildingId={activeSelectedBuildingId || undefined}
               onSelectBuilding={(building) => setSelectedBuildingId(building.id)}
@@ -2142,6 +2297,15 @@ export default function App() {
               }}
               onMemory={(id) => {
                 setSelectedBuildingId(id);
+                setCurrentScreen('monitor');
+              }}
+              telemetryData={telemetryMap}
+              isStreamingTelemetry={isTelemetryStreaming}
+              onToggleStreamingTelemetry={() => setIsTelemetryStreaming(s => !s)}
+              onSimulateTelemetry={handleSimulateTelemetry}
+              onOpenTelemetryMonitor={(id) => {
+                setSelectedBuildingId(id);
+                setMonitorActiveTab('telemetry');
                 setCurrentScreen('monitor');
               }}
             />
@@ -2172,7 +2336,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Total Buildings</div>
                   <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{activeBuildings.length}</div>
@@ -2187,6 +2351,16 @@ export default function App() {
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Active Alerts</div>
                   <div className="text-2xl font-bold text-red-400 font-mono">{alerts.filter(a => !a.read).length}</div>
                   <div className="text-[10px] text-red-400 mt-2">Requires Review</div>
+                </div>
+                <div className="p-4 bg-[#191919] border border-[#222222] rounded cursor-pointer hover:border-[#B58B3B]/40 transition-colors" onClick={() => { setMonitorActiveTab('telemetry'); setCurrentScreen('monitor'); }}>
+                  <div className="text-xs text-[#A7A39A] font-mono mb-1 flex items-center justify-between">
+                    <span>IoT Telemetry</span>
+                    <Radio className={`w-3 h-3 ${isTelemetryStreaming ? 'text-emerald-400 animate-pulse' : 'text-[#777777]'}`} />
+                  </div>
+                  <div className={`text-2xl font-bold font-mono ${criticalTelemetryCount > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                    {criticalTelemetryCount > 0 ? `${criticalTelemetryCount} CRIT` : 'NOMINAL'}
+                  </div>
+                  <div className="text-[10px] text-[#A7A39A] mt-2">{activeBuildings.length * 4} sensors online</div>
                 </div>
                 <div className="p-4 bg-[#191919] border border-[#222222] rounded">
                   <div className="text-xs text-[#A7A39A] font-mono mb-1">Scans Completed</div>
@@ -2209,6 +2383,58 @@ export default function App() {
                   <div className="text-[10px] text-[#A7A39A] mt-2">Submitted inspections</div>
                 </div>
               </div>
+
+              {/* Continuous Structural Health Telemetry Stream Preview */}
+              <section className="p-5 bg-[#141414] border border-[#222222] rounded space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded border ${criticalTelemetryCount > 0 ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
+                      <Radio className={`w-5 h-5 ${isTelemetryStreaming ? 'animate-pulse' : ''}`} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-sm font-bold text-[#F5F0E5]">Continuous Structural Health Telemetry</h2>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${criticalTelemetryCount > 0 ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'} border`}>
+                          {criticalTelemetryCount > 0 ? `${criticalTelemetryCount} Sensor Alerts Active` : 'All Sensors Nominal'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#A7A39A] mt-0.5">
+                        Live triaxial vibration, tilt displacement, microstrain, and basement ingress monitoring.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setCurrentScreen('map')}
+                      className="px-3 py-1.5 bg-[#222222] hover:bg-[#333333] text-xs font-mono text-[#E5C77B] rounded flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <MapPin className="w-3.5 h-3.5" />
+                      <span>View GIS Map</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMonitorActiveTab('telemetry');
+                        setCurrentScreen('monitor');
+                      }}
+                      className="px-3 py-1.5 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center gap-1 cursor-pointer"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      <span>Full Diagnostics</span>
+                    </button>
+                  </div>
+                </div>
+
+                {telemetryMap[activeSelectedBuildingId] && (
+                  <TelemetryPanel
+                    telemetry={telemetryMap[activeSelectedBuildingId]}
+                    isStreaming={isTelemetryStreaming}
+                    onToggleStreaming={() => setIsTelemetryStreaming(s => !s)}
+                    onSimulate={handleSimulateTelemetry}
+                    compact={true}
+                  />
+                )}
+              </section>
 
               {dueWorkOrders.length > 0 && (
                 <section className="p-4 bg-amber-500/10 border border-amber-500/30 rounded flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2313,7 +2539,7 @@ export default function App() {
                           <Cpu className="w-3.5 h-3.5" />
                           <span>Record Inspection</span>
                         </button>}
-                        <button onClick={() => setCurrentScreen('map')} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs rounded transition-colors" title="Locate on Map">
+                        <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('map'); }} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs rounded transition-colors" title="Locate on Map">
                           <MapPin className="w-3.5 h-3.5 text-[#E5C77B]" />
                         </button>
                       </div>
@@ -2371,7 +2597,7 @@ export default function App() {
                     </div>
                     <div className="flex items-center gap-2 pt-3 border-t border-[#222222]">
                       {canEdit && <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors">Record Inspection</button>}
-                      <button onClick={() => setCurrentScreen('map')} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs text-[#E5C77B] rounded font-mono">Map Pin</button>
+                      <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('map'); }} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs text-[#E5C77B] rounded font-mono">Map Pin</button>
                     </div>
                   </div>
                 ))}
@@ -2697,45 +2923,215 @@ export default function App() {
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Building Memory & Inspection History</h1>
-                  <p className="text-sm text-[#A7A39A]">Compare saved records for the same building and component.</p>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-mono uppercase tracking-wider text-[#B58B3B]">Structural Health & Telemetry Array</span>
+                  </div>
+                  <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">IoT Telemetry & Health Diagnostics</h1>
+                  <p className="text-sm text-[#A7A39A]">Continuous multi-sensor telemetry feeds, threshold monitoring, and historical crack memory.</p>
                 </div>
-                <select aria-label="Building history" value={memoryBuilding?.id || ''} onChange={event => setSelectedBuildingId(event.target.value)} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-sm text-[#F5F0E5]">
-                  {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
-                </select>
-              </div>
-              {memoryLatest && (
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded flex flex-wrap gap-4 items-center text-xs">
-                  <span className="text-[#A7A39A]">Latest recorded width change ({memoryLatest.component}):</span>
-                  <strong className={widthChange && widthChange.startsWith('+') ? 'text-amber-300' : 'text-[#E5C77B]'}>{widthChange || 'No comparable measurement'}</strong>
-                  <span className="text-[10px] text-[#A7A39A]">Measurements are manually entered; comparison is descriptive only.</span>
-                </div>
-              )}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                {memoryComparisonScans.map((scan, index) => (
-                  <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="p-4 bg-[#191919] border border-[#222222] rounded text-left space-y-3 hover:border-[#B58B3B]/40">
-                    <div className="flex justify-between gap-3 text-xs">
-                      <span className={index === 0 ? 'text-[#E5C77B]' : 'text-[#A7A39A]'}>{index === 0 ? 'Latest record' : 'Previous record'} · {scan.component}</span>
-                      <span>{formatRecordDate(scan.date)}</span>
-                    </div>
-                    <img src={scan.imageUrl} alt={`${scan.component} inspection evidence`} className="w-full h-56 object-cover rounded" />
-                    <div className="flex justify-between text-xs"><span>Width: {scan.crackWidth}</span><span>{scan.concernLevel}</span></div>
-                    <p className="text-xs text-[#A7A39A] line-clamp-2">{scan.observations.join(' ')}</p>
+                <div className="flex items-center gap-3">
+                  <select
+                    aria-label="Select building for telemetry"
+                    value={activeSelectedBuildingId}
+                    onChange={event => setSelectedBuildingId(event.target.value)}
+                    className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-sm text-[#F5F0E5]"
+                  >
+                    {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
+                  </select>
+                  <button
+                    onClick={() => setCurrentScreen('map')}
+                    className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs font-mono text-[#E5C77B] rounded flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Locate on Map</span>
                   </button>
-                ))}
+                </div>
               </div>
-              {memoryScans.length > 0 && (
-                <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-3">
-                  <h2 className="text-sm font-bold text-[#F5F0E5]">All records · {memoryScans.length}</h2>
-                  {memoryScans.map(scan => (
-                    <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="w-full flex items-center justify-between gap-4 border-t border-[#222222] pt-3 text-left">
-                      <span className="text-xs text-[#F5F0E5]">{scan.component} · {scan.concernLevel}</span>
-                      <span className="text-[11px] text-[#A7A39A]">{formatRecordDate(scan.date)}</span>
-                    </button>
-                  ))}
-                </section>
+
+              {/* Sub-tab Navigation */}
+              <div className="flex border-b border-[#222222] gap-6">
+                <button
+                  type="button"
+                  onClick={() => setMonitorActiveTab('telemetry')}
+                  className={`pb-3 text-xs font-semibold flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
+                    monitorActiveTab === 'telemetry'
+                      ? 'border-[#E5C77B] text-[#E5C77B]'
+                      : 'border-transparent text-[#A7A39A] hover:text-[#F5F0E5]'
+                  }`}
+                >
+                  <Radio className="w-3.5 h-3.5" />
+                  <span>Live IoT Telemetry & Event Simulator</span>
+                  {criticalTelemetryCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-red-500/20 text-red-400 font-mono">
+                      {criticalTelemetryCount} alert{criticalTelemetryCount === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setMonitorActiveTab('memory')}
+                  className={`pb-3 text-xs font-semibold flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
+                    monitorActiveTab === 'memory'
+                      ? 'border-[#E5C77B] text-[#E5C77B]'
+                      : 'border-transparent text-[#A7A39A] hover:text-[#F5F0E5]'
+                  }`}
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Building Memory™ & Inspection History</span>
+                </button>
+              </div>
+
+              {monitorActiveTab === 'telemetry' && (
+                <div className="space-y-6">
+                  {/* Selected building telemetry display */}
+                  {telemetryMap[activeSelectedBuildingId] ? (
+                    <TelemetryPanel
+                      telemetry={telemetryMap[activeSelectedBuildingId]}
+                      isStreaming={isTelemetryStreaming}
+                      onToggleStreaming={() => setIsTelemetryStreaming(s => !s)}
+                      onSimulate={handleSimulateTelemetry}
+                      compact={false}
+                    />
+                  ) : (
+                    <div className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">
+                      No live telemetry feed available for this asset.
+                    </div>
+                  )}
+
+                  {/* Portfolio-Wide Sensor Telemetry Health Table */}
+                  <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-sm font-bold text-[#F5F0E5]">Portfolio-Wide Sensor Telemetry Matrix</h2>
+                        <p className="text-xs text-[#A7A39A]">Real-time telemetry streams across all monitored architectural assets</p>
+                      </div>
+                      <div className="text-xs font-mono text-[#A7A39A]">
+                        {Object.keys(telemetryMap).length * 4} Total Sensors Active
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="text-[#A7A39A] border-b border-[#222222]">
+                          <tr>
+                            <th className="p-3">Asset</th>
+                            <th className="p-3">Location</th>
+                            <th className="p-3">Vibration (g)</th>
+                            <th className="p-3">Tilt (°)</th>
+                            <th className="p-3">Strain (με)</th>
+                            <th className="p-3">Moisture (%)</th>
+                            <th className="p-3">Status</th>
+                            <th className="p-3 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#222222]">
+                          {activeBuildings.map(bld => {
+                            const tel = telemetryMap[bld.id];
+                            const isCrit = tel?.overallStatus === 'critical';
+                            const isWarn = tel?.overallStatus === 'warning';
+                            const isSelected = bld.id === activeSelectedBuildingId;
+
+                            return (
+                              <tr
+                                key={bld.id}
+                                className={`transition-colors ${
+                                  isSelected ? 'bg-[#B58B3B]/10' : isCrit ? 'bg-red-950/20' : 'hover:bg-[#222222]/40'
+                                }`}
+                              >
+                                <td className="p-3 font-semibold text-[#F5F0E5] flex items-center gap-2">
+                                  <span className={`w-2 h-2 rounded-full ${isCrit ? 'bg-red-500 animate-ping' : isWarn ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                                  <span>{bld.name}</span>
+                                </td>
+                                <td className="p-3 text-[#A7A39A]">{bld.location}</td>
+                                <td className={`p-3 font-mono ${tel?.sensors.accelerometer.status === 'critical' ? 'text-red-400 font-bold' : tel?.sensors.accelerometer.status === 'warning' ? 'text-amber-400' : 'text-[#F5F0E5]'}`}>
+                                  {tel ? `${tel.sensors.accelerometer.value} g` : '—'}
+                                </td>
+                                <td className={`p-3 font-mono ${tel?.sensors.tiltmeter.status === 'critical' ? 'text-red-400 font-bold' : tel?.sensors.tiltmeter.status === 'warning' ? 'text-amber-400' : 'text-[#F5F0E5]'}`}>
+                                  {tel ? `${tel.sensors.tiltmeter.value} °` : '—'}
+                                </td>
+                                <td className={`p-3 font-mono ${tel?.sensors.strain_gauge.status === 'critical' ? 'text-red-400 font-bold' : tel?.sensors.strain_gauge.status === 'warning' ? 'text-amber-400' : 'text-[#F5F0E5]'}`}>
+                                  {tel ? `${tel.sensors.strain_gauge.value} με` : '—'}
+                                </td>
+                                <td className={`p-3 font-mono ${tel?.sensors.moisture.status === 'critical' ? 'text-red-400 font-bold' : tel?.sensors.moisture.status === 'warning' ? 'text-amber-400' : 'text-[#F5F0E5]'}`}>
+                                  {tel ? `${tel.sensors.moisture.value} %` : '—'}
+                                </td>
+                                <td className="p-3">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                                    isCrit ? 'bg-red-500/20 text-red-400 border border-red-500/30' : isWarn ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                  }`}>
+                                    {tel?.overallStatus || 'NOMINAL'}
+                                  </span>
+                                </td>
+                                <td className="p-3 text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedBuildingId(bld.id)}
+                                      className="px-2.5 py-1 bg-[#222222] hover:bg-[#333333] text-xs font-mono text-[#E5C77B] rounded cursor-pointer"
+                                    >
+                                      Inspect
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedBuildingId(bld.id);
+                                        setCurrentScreen('map');
+                                      }}
+                                      className="p-1.5 bg-[#222222] hover:bg-[#333333] text-[#A7A39A] hover:text-[#F5F0E5] rounded cursor-pointer"
+                                      title="Locate on Map"
+                                    >
+                                      <MapPin className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                </div>
               )}
-              {memoryScans.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No inspection history for this building yet.</p>}
+
+              {monitorActiveTab === 'memory' && (
+                <div className="space-y-6">
+                  {memoryLatest && (
+                    <div className="p-4 bg-[#191919] border border-[#222222] rounded flex flex-wrap gap-4 items-center text-xs">
+                      <span className="text-[#A7A39A]">Latest recorded width change ({memoryLatest.component}):</span>
+                      <strong className={widthChange && widthChange.startsWith('+') ? 'text-amber-300' : 'text-[#E5C77B]'}>{widthChange || 'No comparable measurement'}</strong>
+                      <span className="text-[10px] text-[#A7A39A]">Measurements are manually entered; comparison is descriptive only.</span>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                    {memoryComparisonScans.map((scan, index) => (
+                      <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="p-4 bg-[#191919] border border-[#222222] rounded text-left space-y-3 hover:border-[#B58B3B]/40">
+                        <div className="flex justify-between gap-3 text-xs">
+                          <span className={index === 0 ? 'text-[#E5C77B]' : 'text-[#A7A39A]'}>{index === 0 ? 'Latest record' : 'Previous record'} · {scan.component}</span>
+                          <span>{formatRecordDate(scan.date)}</span>
+                        </div>
+                        <img src={scan.imageUrl} alt={`${scan.component} inspection evidence`} className="w-full h-56 object-cover rounded" />
+                        <div className="flex justify-between text-xs"><span>Width: {scan.crackWidth}</span><span>{scan.concernLevel}</span></div>
+                        <p className="text-xs text-[#A7A39A] line-clamp-2">{scan.observations.join(' ')}</p>
+                      </button>
+                    ))}
+                  </div>
+                  {memoryScans.length > 0 && (
+                    <section className="p-5 bg-[#191919] border border-[#222222] rounded space-y-3">
+                      <h2 className="text-sm font-bold text-[#F5F0E5]">All records · {memoryScans.length}</h2>
+                      {memoryScans.map(scan => (
+                        <button key={scan.id} onClick={() => { setCurrentScanResult(scan); setCurrentScreen('diagnosis'); }} className="w-full flex items-center justify-between gap-4 border-t border-[#222222] pt-3 text-left">
+                          <span className="text-xs text-[#F5F0E5]">{scan.component} · {scan.concernLevel}</span>
+                          <span className="text-[11px] text-[#A7A39A]">{formatRecordDate(scan.date)}</span>
+                        </button>
+                      ))}
+                    </section>
+                  )}
+                  {memoryScans.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No inspection history for this building yet.</p>}
+                </div>
+              )}
             </div>
           )}
 
@@ -3025,7 +3421,7 @@ export default function App() {
                     </select>
                   </div>
                   <textarea required rows={4} value={checklistItemsInput} onChange={event => setChecklistItemsInput(event.target.value)} className="w-full px-3 py-2 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder={'One checklist item per line'} />
-                  {checklistError && <p role="alert" className="text-xs text-red-300">{checklistError}</p>}
+                   {checklistError && <p role="alert" className="text-xs text-red-300">{checklistError}</p>}
                   <button type="submit" className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Save checklist template</button>
                 </form>
               </section>
