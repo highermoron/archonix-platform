@@ -229,6 +229,16 @@ export default function WorldMap({
   const [newIncidentNote, setNewIncidentNote] = useState('');
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [isSavingPin, setIsSavingPin] = useState(false);
+  const [addressQuery, setAddressQuery] = useState('');
+  const [addressResults, setAddressResults] = useState<Array<{
+    id: string;
+    label: string;
+    lat: number;
+    lng: number;
+  }>>([]);
+  const [isSearchingAddress, setIsSearchingAddress] = useState(false);
+  const [addressSearchError, setAddressSearchError] = useState<string | null>(null);
+  const maptilerKey = import.meta.env.VITE_MAPTILER_API_KEY?.trim() || '';
 
   const [activeStatuses, setActiveStatuses] = useState<Set<Status>>(new Set(ALL_STATUSES));
   const [activeSpatialResult, setActiveSpatialResult] = useState<SpatialAIResult | null>(null);
@@ -248,6 +258,77 @@ export default function WorldMap({
     }
     return list;
   }, [plotted, activeStatuses, activeSpatialResult]);
+
+  useEffect(() => {
+    const query = addressQuery.trim();
+    if (query.length < 3) {
+      setAddressResults([]);
+      setIsSearchingAddress(false);
+      setAddressSearchError(null);
+      return;
+    }
+
+    if (!maptilerKey) {
+      setAddressResults([]);
+      setIsSearchingAddress(false);
+      setAddressSearchError('Address suggestions are unavailable: MapTiler API key is not configured.');
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setIsSearchingAddress(true);
+      setAddressSearchError(null);
+      try {
+        const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(query)}.json?autocomplete=true&limit=5&key=${encodeURIComponent(maptilerKey)}`;
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(`Address suggestions failed (${response.status})`);
+        }
+
+        const data: unknown = await response.json();
+        const features = typeof data === 'object' && data !== null && 'features' in data
+          && Array.isArray(data.features)
+          ? data.features
+          : [];
+        const parsed = features.flatMap((feature, index) => {
+          if (typeof feature !== 'object' || feature === null) return [];
+          const item = feature as {
+            id?: unknown;
+            place_name?: unknown;
+            text?: unknown;
+            geometry?: { coordinates?: unknown };
+          };
+          const coordinates = item.geometry?.coordinates;
+          if (!Array.isArray(coordinates)) return [];
+          const lng = Number(coordinates[0]);
+          const lat = Number(coordinates[1]);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)
+            || lat < -90 || lat > 90 || lng < -180 || lng > 180) return [];
+
+          return [{
+            id: String(item.id ?? `${lat}-${lng}-${index}`),
+            label: String(item.place_name ?? item.text ?? query),
+            lat,
+            lng,
+          }];
+        });
+        setAddressResults(parsed);
+        if (parsed.length === 0) setAddressSearchError('No matching address or landmark found.');
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') return;
+        setAddressResults([]);
+        setAddressSearchError(error instanceof Error ? error.message : 'Address suggestions failed.');
+      } finally {
+        if (!controller.signal.aborted) setIsSearchingAddress(false);
+      }
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [addressQuery, maptilerKey]);
 
   // Reverse-geocode clicked/dragged pin so user doesn't need to type a street address
   const resolveSuburbFromCoords = useCallback(async (lat: number, lng: number) => {
@@ -280,12 +361,22 @@ export default function WorldMap({
   }, []);
 
   // Place or move the draggable precision target marker on the map
-  const placeTargetPin = useCallback((lat: number, lng: number, openDrawer = true) => {
+  const placeTargetPin = useCallback((
+    lat: number,
+    lng: number,
+    openDrawer = true,
+    locationHint?: string
+  ) => {
     const fixedLat = Number(lat.toFixed(6));
     const fixedLng = Number(lng.toFixed(6));
     setPickedCoordinates([fixedLat, fixedLng]);
     onMapClickRef.current?.(fixedLat, fixedLng);
-    resolveSuburbFromCoords(fixedLat, fixedLng);
+    if (locationHint) {
+      setNewBuildingLocation(locationHint);
+      setIsDetectingLocation(false);
+    } else {
+      resolveSuburbFromCoords(fixedLat, fixedLng);
+    }
 
     if (openDrawer) {
       setSelectedId(null);
@@ -577,6 +668,20 @@ export default function WorldMap({
     placeTargetPin(center.lat, center.lng, true);
   };
 
+  const handleSelectAddressSuggestion = (item: {
+    id: string;
+    label: string;
+    lat: number;
+    lng: number;
+  }) => {
+    setAddressQuery(item.label);
+    setAddressResults([]);
+    setAddressSearchError(null);
+    setNewBuildingLocation(item.label);
+    mapRef.current?.flyTo([item.lat, item.lng], 17, { duration: 1.2 });
+    placeTargetPin(item.lat, item.lng, true, item.label);
+  };
+
   const handleSaveNewPin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pickedCoordinates || !newBuildingName.trim()) return;
@@ -768,6 +873,54 @@ export default function WorldMap({
         {/* Map Viewport */}
         <div className="lg:col-span-3 relative isolate rounded border border-[#222222] overflow-hidden bg-[#0d0d0d]">
           <div ref={containerRef} className="h-[68vh] min-h-[500px] w-full cursor-crosshair" />
+
+          <div className="absolute top-3 left-3 z-[650] w-[calc(100%-7rem)] max-w-md">
+            <div className="relative rounded border border-[#333333] bg-[#141414]/95 p-1.5 shadow-lg backdrop-blur-md">
+              <MapPin className="absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#E5C77B]" />
+              <input
+                type="search"
+                value={addressQuery}
+                onChange={(event) => {
+                  setAddressQuery(event.target.value);
+                  setAddressSearchError(null);
+                }}
+                aria-label="Search an address or place"
+                aria-expanded={addressResults.length > 0}
+                aria-controls="map-address-suggestions"
+                placeholder="Search address, street, or building to pin..."
+                className="w-full rounded border border-transparent bg-[#0a0a0a] py-1.5 pl-8 pr-9 text-xs text-[#F5F0E5] outline-none placeholder:text-[#777777] focus:border-[#E5C77B]"
+              />
+              {isSearchingAddress && (
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[11px] font-mono text-[#E5C77B]" role="status">
+                  ...
+                </span>
+              )}
+            </div>
+
+            {(addressResults.length > 0 || addressSearchError) && (
+              <div className="mt-1 overflow-hidden rounded border border-[#B58B3B]/60 bg-[#141414] shadow-xl">
+                {addressSearchError ? (
+                  <p role="status" className="px-3 py-2 text-xs text-[#A7A39A]">
+                    {addressSearchError}
+                  </p>
+                ) : (
+                  <ul id="map-address-suggestions" className="max-h-60 overflow-y-auto">
+                    {addressResults.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectAddressSuggestion(item)}
+                          className="w-full border-b border-[#222222] px-3 py-2 text-left text-xs leading-relaxed text-[#F5F0E5] last:border-b-0 hover:bg-[#222222]"
+                        >
+                          {item.label}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Map Base Layer Switcher (Satellite / Tactical Dark / Street) */}
           <div className="absolute top-3 right-3 z-[500] flex items-center bg-[#141414]/95 border border-[#333333] rounded p-1 backdrop-blur-md shadow-lg">
