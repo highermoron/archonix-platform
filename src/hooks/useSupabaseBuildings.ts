@@ -1,61 +1,39 @@
 import { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
 import type { BuildingProfile } from '../archonix';
 
 export function useSupabaseBuildings() {
   const [buildings, setBuildings] = useState<BuildingProfile[]>([]);
-  const [loading, setLoading] = useState<boolean>(Boolean(supabase));
-  const [error, setError] = useState<string | null>(() =>
-    supabase ? null : 'Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment.'
-  );
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const client = supabase;
-    if (!client) return;
     let active = true;
-    let requestGeneration = 0;
 
-    async function fetchBuildings(database: NonNullable<typeof supabase>, generation: number) {
+    async function fetchBuildings() {
       try {
-        const { data, error } = await database
-          .from('buildings')
-          .select('*')
-          .order('created_at', { ascending: false });
-
-        if (error) {
-          throw error;
+        const response = await fetch('/api/buildings');
+        if (!response.ok) {
+          const result = await response.json().catch(() => null) as { error?: string } | null;
+          throw new Error(result?.error || `Building request failed (${response.status})`);
         }
-
-        if (active && generation === requestGeneration) {
-          setBuildings((data || []) as BuildingProfile[]);
+        const data = await response.json() as BuildingProfile[];
+        if (active) {
+          setBuildings(data);
           setError(null);
         }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unknown Supabase error';
-        console.error('Failed to fetch buildings from Supabase:', message);
-        if (active && generation === requestGeneration) setError(message);
+        const message = err instanceof Error ? err.message : 'Unknown database error';
+        console.error('Failed to fetch buildings from Neon:', message);
+        if (active) setError(message);
       } finally {
-        if (active && generation === requestGeneration) setLoading(false);
+        if (active) setLoading(false);
       }
     }
 
-    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
-      requestGeneration += 1;
-      if (!session) {
-        setBuildings([]);
-        setError(null);
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-      const generation = requestGeneration;
-      window.setTimeout(() => void fetchBuildings(client, generation), 0);
-    });
+    void fetchBuildings();
 
     return () => {
       active = false;
-      subscription.unsubscribe();
     };
   }, []);
 

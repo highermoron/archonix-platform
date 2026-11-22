@@ -623,7 +623,7 @@ export default function App() {
 
     const remoteBuildings: Building[] = supabaseBuildings.map(profile => {
       const local = buildings.find(building => building.id === profile.id);
-      const classification = profile.building_classification.toLowerCase();
+      const classification = (profile.building_classification || 'Other').toLowerCase();
       const type: Building['type'] = classification.includes('residential')
         ? 'Residential'
         : classification.includes('industrial')
@@ -648,9 +648,9 @@ export default function App() {
         lat: profile.latitude,
         lng: profile.longitude,
         type,
-        year: profile.construction_year,
-        floors: profile.floors_above_ground,
-        description: profile.description,
+        year: profile.construction_year || 2022,
+        floors: profile.floors_above_ground || 1,
+        description: profile.description || 'Structural asset loaded from the connected database.',
         status: local?.status || status,
         healthIndex: local?.healthIndex,
         lastScanDate: local?.lastScanDate || 'Not scanned',
@@ -706,6 +706,7 @@ export default function App() {
   const [buildingCsvPreview, setBuildingCsvPreview] = useState<CsvImportRow[]>([]);
   const [buildingCsvErrors, setBuildingCsvErrors] = useState<string[]>([]);
   const [buildingCsvName, setBuildingCsvName] = useState('');
+  const [buildingRegistrationError, setBuildingRegistrationError] = useState<string | null>(null);
   const [browserNotificationPermission, setBrowserNotificationPermission] = useState<NotificationPermission | 'unsupported'>(() =>
     typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
   );
@@ -1455,13 +1456,48 @@ export default function App() {
     setCurrentScreen('dashboard');
   };
 
-  const handleRegisterBuilding = (e: React.FormEvent) => {
+  const handleRegisterBuilding = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canManageBuildings) return;
     if (!newBuilding.name || !newBuilding.location) return;
+    setBuildingRegistrationError(null);
+
+    let createdId = makeLocalId('bld');
+
+    if (!isDemoSession) {
+      try {
+        const response = await fetch('/api/buildings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            building_code: `ARC-${Date.now().toString(36).toUpperCase()}`,
+            name: newBuilding.name,
+            street_address: newBuilding.location,
+            latitude: Number(newBuilding.lat),
+            longitude: Number(newBuilding.lng),
+            construction_year: Number(newBuilding.year),
+            building_classification: newBuilding.type,
+            floors_above_ground: Number(newBuilding.floors),
+            description: newBuilding.description || 'Newly registered structural asset under automated monitoring.',
+            monitoring_status: newBuilding.incidentNote ? 'attention_required' : 'active',
+            is_demo_data: false
+          })
+        });
+        if (!response.ok) {
+          const result = await response.json().catch(() => null) as { error?: string } | null;
+          throw new Error(result?.error || `Building save failed (${response.status})`);
+        }
+        const saved = await response.json() as { id?: string };
+        if (saved.id) createdId = saved.id;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Building could not be saved.';
+        setBuildingRegistrationError(message);
+        return;
+      }
+    }
 
     const created: Building = {
-      id: makeLocalId('bld'),
+      id: createdId,
       name: newBuilding.name,
       location: newBuilding.location,
       lat: Number(newBuilding.lat),
@@ -1923,11 +1959,38 @@ export default function App() {
 
         <div className="lg:w-1/2 flex items-center justify-center p-8 lg:p-16">
           <div className="w-full max-w-md">
-            <div className="mb-8">
-              <h2 className="text-2xl font-bold text-[#F5F0E5] mb-2">{isResettingPassword ? 'Choose a new password' : isSignUp ? 'Create your account' : 'Access Command Center'}</h2>
-              <p className="text-sm text-[#A7A39A]">{isResettingPassword ? 'Set a new password for your account.' : isSignUp ? 'Create an ARCHONIX account with your work email.' : 'Sign in with your ARCHONIX team account. Demo access is available separately.'}</p>
-            </div>
-            <form onSubmit={isResettingPassword ? handlePasswordUpdate : handleAuthSubmit} className="space-y-6">
+            {!supabase ? (
+              <div>
+                <div className="mb-6">
+                  <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-[10px] font-mono uppercase tracking-wider text-amber-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                    Interactive demo
+                  </span>
+                  <h2 className="mt-4 text-3xl font-bold text-[#F5F0E5]">Explore the command center</h2>
+                  <p className="mt-2 text-sm leading-relaxed text-[#A7A39A]">
+                    Production sign-in is not configured. Enter the browser-based demo to explore the full interface with sample building data.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDemoLogin}
+                  className="w-full px-5 py-4 bg-[#E5C77B] hover:bg-[#F0D88F] text-[#090909] font-semibold rounded transition-colors inline-flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#B58B3B]/15"
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>Enter Demo Workspace</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+                <p className="mt-3 text-center text-[11px] text-[#A7A39A]">
+                  No account required · Demo data stays in this browser
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="mb-8">
+                  <h2 className="text-2xl font-bold text-[#F5F0E5] mb-2">{isResettingPassword ? 'Choose a new password' : isSignUp ? 'Create your account' : 'Access Command Center'}</h2>
+                  <p className="text-sm text-[#A7A39A]">{isResettingPassword ? 'Set a new password for your account.' : isSignUp ? 'Create an ARCHONIX account with your work email.' : 'Sign in with your ARCHONIX team account.'}</p>
+                </div>
+                <form onSubmit={isResettingPassword ? handlePasswordUpdate : handleAuthSubmit} className="space-y-6">
               {isSignUp && !isResettingPassword && (
                 <div>
                   <label htmlFor="auth-full-name" className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Full Name *</label>
@@ -2035,11 +2098,6 @@ export default function App() {
                 setAuthNotice(null);
               }} className="mt-5 w-full text-center text-xs text-[#E5C77B] hover:underline">Cancel password update</button>
             )}
-            {!supabase && (
-              <p className="mt-4 text-xs text-[#A7A39A]">
-                Production sign-in is unavailable until Supabase credentials are configured.
-              </p>
-            )}
             {!isResettingPassword && <div className="mt-8 pt-6 border-t border-[#222222] text-center">
               <p className="text-xs text-[#A7A39A] mb-3">Local demo workspace — data is stored in this browser</p>
               <button onClick={handleDemoLogin} className="px-4 py-2 bg-[#191919] hover:bg-[#222222] border border-[#222222] rounded text-xs text-[#E5C77B] font-mono transition-colors inline-flex items-center gap-2">
@@ -2047,6 +2105,8 @@ export default function App() {
                 <span>Enter Demo Workspace</span>
               </button>
             </div>}
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2159,6 +2219,34 @@ export default function App() {
         </div>
 
         <div className="p-4 space-y-1 overflow-y-auto max-h-[calc(100vh-4rem)]">
+          {isDemoSession && (
+            <div className="mx-0 mb-4 p-3 rounded border border-amber-500/40 bg-amber-500/10">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+                  </span>
+                  <span className="text-xs font-bold text-amber-200">Demo workspace</span>
+                </div>
+                <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-[#090909]/40 text-[9px] font-mono text-amber-300">
+                  LOCAL
+                </span>
+              </div>
+              <p className="mt-2 text-[10px] leading-relaxed text-[#A7A39A]">
+                Sample data is stored in this browser only.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm('Reset all demo data to the preloaded sample workspace?')) resetDemoData();
+                }}
+                className="mt-3 w-full px-3 py-2 rounded border border-amber-500/30 bg-[#090909]/40 text-[10px] font-mono text-amber-200 hover:bg-amber-500/10 transition-colors"
+              >
+                Reset Demo Data
+              </button>
+            </div>
+          )}
           <div className="px-3 py-2 text-[10px] font-mono text-[#A7A39A] uppercase tracking-wider">Navigation</div>
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -2260,23 +2348,23 @@ export default function App() {
         <main className="flex-1 p-6 lg:p-8 bg-[#090909] overflow-y-auto">
           {buildingsLoading && (
             <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
-              Loading buildings from Supabase…
+              Loading buildings from the Neon database…
             </div>
           )}
           {buildingsError && (
             <div role="alert" className="mb-4 p-3 rounded border border-amber-500/30 bg-amber-500/10 text-xs text-amber-200">
-              Building data could not be loaded from Supabase: {buildingsError} {isDemoSession ? 'Using local demo buildings instead.' : 'Showing account-local buildings, if available.'}
+              Building data could not be loaded from Neon: {buildingsError} {isDemoSession ? 'Using local demo buildings instead.' : 'Showing local buildings, if available.'}
             </div>
           )}
           {!buildingsLoading && !buildingsError && (
             <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
               {supabaseBuildings.length > 0
-                ? `Loaded ${supabaseBuildings.length} buildings from Supabase.`
+                ? `Loaded ${supabaseBuildings.length} buildings from the Neon database.`
                 : isDemoSession
-                  ? 'No buildings found in Supabase; using local demo buildings.'
+                  ? 'Demo workspace; using local sample buildings.'
                   : activeBuildings.length > 0
-                    ? 'Showing account-local buildings; these are not shared with organization members.'
-                    : 'No buildings are assigned to this organization yet.'}
+                    ? 'Showing available local or database buildings.'
+                    : 'No buildings are available from the database yet.'}
             </div>
           )}
           {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some browser data could not be read or saved: {storageError}. Export or copy important records before leaving.</div>}
@@ -2655,6 +2743,11 @@ export default function App() {
                 <p className="text-sm text-[#A7A39A]">Input structural parameters and GPS coordinates to plot the site on the GIS Incident Map.</p>
               </div>
               <form onSubmit={handleRegisterBuilding} className="p-6 bg-[#191919] border border-[#222222] rounded space-y-5">
+                {buildingRegistrationError && (
+                  <p role="alert" className="p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+                    {buildingRegistrationError}
+                  </p>
+                )}
                 <div>
                   <label className="block text-xs font-mono uppercase tracking-wider text-[#A7A39A] mb-2">Building Name *</label>
                   <input type="text" required value={newBuilding.name} onChange={(e) => setNewBuilding({...newBuilding, name: e.target.value})} className="w-full px-4 py-3 bg-[#090909] border border-[#222222] rounded text-sm text-[#F5F0E5]" placeholder="e.g. Circular Quay Tower" />
@@ -3425,15 +3518,6 @@ export default function App() {
                   <button type="submit" className="px-4 py-2 bg-[#222222] text-xs text-[#E5C77B] rounded">Save checklist template</button>
                 </form>
               </section>
-              {isDemoSession && (
-                <div className="p-6 bg-[#191919] border border-[#222222] rounded flex items-center justify-between gap-4">
-                  <div>
-                    <h4 className="text-xs font-bold text-[#F5F0E5]">Reset Demo Data</h4>
-                    <p className="text-[11px] text-[#A7A39A]">Restore the preloaded buildings, alerts, and inspection records. Tasks are removed too.</p>
-                  </div>
-                  <button onClick={resetDemoData} className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 text-xs rounded">Reset Data</button>
-                </div>
-              )}
             </div>
           )}
         </main>
