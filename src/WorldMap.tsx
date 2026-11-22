@@ -204,7 +204,7 @@ export default function WorldMap({
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const layerRef = useRef<L.MarkerClusterGroup | null>(null);
   const targetMarkerRef = useRef<L.Marker | null>(null);
-  const markersRef = useRef>(new Map());
+  const markersRef = useRef<Map<string, L.Marker>>(new Map());
   const onMapClickRef = useRef(onMapClick);
   const onSelectBuildingRef = useRef(onSelectBuilding);
   const previousSelectedIdRef = useRef<string | null>(selectedBuildingId ?? null);
