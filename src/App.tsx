@@ -13,6 +13,7 @@ import {
   Radio, Sparkles
 } from 'lucide-react';
 import TelemetryPanel from './components/TelemetryPanel';
+import { DemoAuthLanding } from './components/DemoAuthLanding';
 import { 
   createDefaultBuildingTelemetry, 
   generateInitialTelemetry, 
@@ -286,7 +287,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-001',
-    name: 'The Shard (Demo)',
+    name: 'The Shard',
     location: 'London, United Kingdom',
     lat: 51.5045,
     lng: -0.0865,
@@ -300,7 +301,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-002',
-    name: 'Empire State Building (Demo)',
+    name: 'Empire State Building',
     location: 'New York, United States',
     lat: 40.7484,
     lng: -73.9857,
@@ -314,7 +315,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-003',
-    name: 'Eiffel Tower (Demo)',
+    name: 'Eiffel Tower',
     location: 'Paris, France',
     lat: 48.8584,
     lng: 2.2945,
@@ -328,7 +329,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-004',
-    name: 'Burj Khalifa (Demo)',
+    name: 'Burj Khalifa',
     location: 'Dubai, United Arab Emirates',
     lat: 25.1972,
     lng: 55.2744,
@@ -342,7 +343,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-005',
-    name: 'Marina Bay Sands (Demo)',
+    name: 'Marina Bay Sands',
     location: 'Singapore',
     lat: 1.2834,
     lng: 103.8607,
@@ -356,7 +357,7 @@ const INITIAL_BUILDINGS: Building[] = [
   },
   {
     id: 'bld-world-006',
-    name: 'Tokyo Tower (Demo)',
+    name: 'Tokyo Tower',
     location: 'Tokyo, Japan',
     lat: 35.6586,
     lng: 139.7454,
@@ -834,10 +835,11 @@ export default function App() {
               return needsImageUpdate || needsSchoolDescriptionUpdate
                 ? {
                     ...saved,
+                    name: initial.name,
                     imageUrl: needsImageUpdate ? initial.imageUrl : saved.imageUrl,
                     description: needsSchoolDescriptionUpdate ? initial.description : saved.description
                   }
-                : saved;
+                : { ...saved, name: initial.name };
             }),
             ...INITIAL_BUILDINGS.filter(initial =>
               !savedBuildings.some(saved => saved.id === initial.id)
@@ -1913,6 +1915,10 @@ export default function App() {
   }, [telemetryMap]);
 
   if (!isAuthenticated || currentScreen === 'login' || currentScreen === 'password-reset') {
+    if (!supabase) {
+      return <DemoAuthLanding onEnterWorkspace={handleDemoLogin} />;
+    }
+
     const isResettingPassword = currentScreen === 'password-reset';
     return (
       <div className="min-h-screen bg-[#090909] text-[#F5F0E5] flex flex-col lg:flex-row font-sans selection:bg-[#B58B3B] selection:text-white">

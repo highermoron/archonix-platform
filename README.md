@@ -26,7 +26,7 @@ The migration adds `buildings.organisation_id` and enforces organization-scoped 
 
 Membership roles are `administrator`, `structural_engineer`, `inspector`, and `viewer`. The migration limits organization membership and building access with Supabase Row Level Security. Client-side role checks remain a user-experience control, not a security boundary. Never put a Supabase service-role key in the browser. Review the migration against your project schema and back up your database before applying it to production.
 
-Without Supabase configuration, use **Enter Demo Workspace**. It is an explicitly local demo and does not authenticate a user.
+Without Supabase configuration, **Sign In as Operator** and **Enter Demo Workspace** both open the local demo immediately; neither authenticates a user.
 
 ## Data and inspection limitations
 
