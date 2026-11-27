@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useSupabaseBuildings } from './hooks/useSupabaseBuildings';
-import WorldMap from './WorldMap';
+import type { NewPinPayload } from './WorldMap';
 import { supabase } from './lib/supabase';
 import type { UserRole } from './archonix';
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
@@ -23,6 +23,8 @@ import {
 } from './lib/telemetryService';
 import type { BuildingTelemetry, SimulationPreset } from './types/telemetry';
 
+const WorldMap = React.lazy(() => import('./WorldMap'));
+
 // --- TYPES ---
 type Screen = 
   | 'login' 
@@ -43,6 +45,9 @@ type Screen =
   | 'work-orders'
   | 'reports' 
   | 'settings';
+
+type DemoOperatorRole = 'Structural Inspector' | 'Operations Lead';
+type CurrentUserRole = UserRole | DemoOperatorRole | 'DEMO';
 
 interface Building {
   id: string;
@@ -539,6 +544,22 @@ function statusForConcern(concern: ScanRecord['concernLevel']): Building['status
   return 'Low Concern';
 }
 
+function addMissingBuildingTelemetry(
+  telemetry: Record<string, BuildingTelemetry>,
+  buildings: Pick<Building, 'id' | 'name'>[]
+): Record<string, BuildingTelemetry> {
+  let next = telemetry;
+  for (const building of buildings) {
+    if (!next[building.id]) {
+      next = {
+        ...next,
+        [building.id]: createDefaultBuildingTelemetry(building.id, building.name)
+      };
+    }
+  }
+  return next;
+}
+
 const DEFAULT_NEW_BUILDING = {
   name: '',
   location: '',
@@ -565,7 +586,7 @@ export default function App() {
   const [passwordConfirmInput, setPasswordConfirmInput] = useState('');
   const [todayDate, setTodayDate] = useState(currentLocalDate);
   const [reportGeneratedDate] = useState(() => new Date().toLocaleDateString());
-  const [currentUser, setCurrentUser] = useState<{ id: string; email: string; name: string; role: UserRole } | null>(null);
+  const [currentUser, setCurrentUser] = useState<{ id: string; email: string; name: string; role: CurrentUserRole } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const workspaceStorageScope = isDemoSession ? 'demo' : userId ? `user-${userId}` : null;
   const [dataScopeLoaded, setDataScopeLoaded] = useState<string | null>(null);
@@ -720,52 +741,42 @@ export default function App() {
   const [newBuilding, setNewBuilding] = useState(DEFAULT_NEW_BUILDING);
 
   // --- LIVE IOT STRUCTURAL HEALTH TELEMETRY STATE ---
-  const [telemetryMap, setTelemetryMap] = useState<Record<string, BuildingTelemetry>>(() =>
+  const [telemetryState, setTelemetryState] = useState<Record<string, BuildingTelemetry>>(() =>
     generateInitialTelemetry(INITIAL_BUILDINGS)
+  );
+  const telemetryMap = useMemo(
+    () => addMissingBuildingTelemetry(telemetryState, activeBuildings),
+    [telemetryState, activeBuildings]
   );
   const [isTelemetryStreaming, setIsTelemetryStreaming] = useState<boolean>(true);
   const [monitorActiveTab, setMonitorActiveTab] = useState<'telemetry' | 'memory'>('telemetry');
-
-  // Synchronize telemetryMap whenever activeBuildings changes
-  useEffect(() => {
-    setTelemetryMap(prev => {
-      let changed = false;
-      const next = { ...prev };
-      for (const bld of activeBuildings) {
-        if (!next[bld.id]) {
-          next[bld.id] = createDefaultBuildingTelemetry(bld.id, bld.name);
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [activeBuildings]);
 
   // Live telemetry ticker loop: simulates real-time micro-fluctuations every 2.5s
   useEffect(() => {
     if (!isTelemetryStreaming) return;
     const interval = window.setInterval(() => {
-      setTelemetryMap(prev => tickTelemetry(prev));
+      setTelemetryState(prev => tickTelemetry(addMissingBuildingTelemetry(prev, activeBuildings)));
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [isTelemetryStreaming]);
+  }, [isTelemetryStreaming, activeBuildings]);
 
   // Optional Supabase Realtime Telemetry Subscription
   useEffect(() => {
     const unsubscribe = subscribeToSupabaseTelemetry((reading) => {
-      setTelemetryMap(prev => {
-        const bld = prev[reading.building_id];
-        if (!bld) return prev;
+      setTelemetryState(prev => {
+        const completeTelemetry = addMissingBuildingTelemetry(prev, activeBuildings);
+        const bld = completeTelemetry[reading.building_id];
+        if (!bld) return completeTelemetry;
         const now = new Date().toLocaleTimeString();
         const sensorKey = reading.sensor_type as keyof typeof bld.sensors;
-        if (!bld.sensors[sensorKey]) return prev;
+        if (!bld.sensors[sensorKey]) return completeTelemetry;
 
         const currentSensor = bld.sensors[sensorKey];
         const val = Number(reading.value);
         const status = val >= currentSensor.criticalThreshold ? 'critical' : val >= currentSensor.warningThreshold ? 'warning' : 'normal';
 
         return {
-          ...prev,
+          ...completeTelemetry,
           [reading.building_id]: {
             ...bld,
             lastUpdated: now,
@@ -785,7 +796,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [activeBuildings]);
 
   useEffect(() => {
     const handleStorageResult = (event: Event) => {
@@ -1026,7 +1037,7 @@ export default function App() {
 
   const handleSimulateTelemetry = (preset: SimulationPreset, targetBuildingId?: string) => {
     const result = executeSimulation(preset, telemetryMap, targetBuildingId);
-    setTelemetryMap(result.updatedTelemetry);
+    setTelemetryState(result.updatedTelemetry);
 
     if (result.generatedAlert) {
       const newAlert: AlertItem = {
@@ -1444,11 +1455,15 @@ export default function App() {
     }
   };
 
-  const handleDemoLogin = () => {
-    setUserEmail('lachlan.ross@archonix.com.au');
+  const handleDemoLogin = (operator?: { email: string; role: string }) => {
+    const email = operator?.email.trim() || 'lachlan.ross@archonix.com.au';
+    const role: CurrentUserRole = operator?.role === 'Structural Inspector' || operator?.role === 'Operations Lead'
+      ? operator.role
+      : 'DEMO';
+    setUserEmail(email);
     setPasswordInput('');
     isDemoSessionRef.current = true;
-    setCurrentUser({ id: 'demo', email: 'lachlan.ross@archonix.com.au', name: 'Demo Analyst', role: 'administrator' });
+    setCurrentUser({ id: 'demo', email, name: operator ? 'Demo Operator' : 'Demo Analyst', role });
     setUserId(null);
     setOrganizationId(null);
     setOrganizationName('');
@@ -1458,11 +1473,17 @@ export default function App() {
     setCurrentScreen('dashboard');
   };
 
-  const handleRegisterBuilding = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canManageBuildings) return;
-    if (!newBuilding.name || !newBuilding.location) return;
-    setBuildingRegistrationError(null);
+  const registerBuilding = async (buildingInput: typeof DEFAULT_NEW_BUILDING) => {
+    if (!canManageBuildings) throw new Error('Your account role cannot register buildings.');
+    const name = buildingInput.name.trim();
+    const location = buildingInput.location.trim();
+    const latitude = Number(buildingInput.lat);
+    const longitude = Number(buildingInput.lng);
+    if (!name || !location) throw new Error('Enter a building name and location.');
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90
+      || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new Error('Enter valid latitude and longitude coordinates.');
+    }
 
     let createdId = makeLocalId('bld');
 
@@ -1473,15 +1494,15 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             building_code: `ARC-${Date.now().toString(36).toUpperCase()}`,
-            name: newBuilding.name,
-            street_address: newBuilding.location,
-            latitude: Number(newBuilding.lat),
-            longitude: Number(newBuilding.lng),
-            construction_year: Number(newBuilding.year),
-            building_classification: newBuilding.type,
-            floors_above_ground: Number(newBuilding.floors),
-            description: newBuilding.description || 'Newly registered structural asset under automated monitoring.',
-            monitoring_status: newBuilding.incidentNote ? 'attention_required' : 'active',
+            name,
+            street_address: location,
+            latitude,
+            longitude,
+            construction_year: Number(buildingInput.year),
+            building_classification: buildingInput.type,
+            floors_above_ground: Number(buildingInput.floors),
+            description: buildingInput.description || 'Newly registered structural asset under automated monitoring.',
+            monitoring_status: buildingInput.incidentNote ? 'attention_required' : 'active',
             is_demo_data: false
           })
         });
@@ -1492,43 +1513,54 @@ export default function App() {
         const saved = await response.json() as { id?: string };
         if (saved.id) createdId = saved.id;
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Building could not be saved.';
-        setBuildingRegistrationError(message);
-        return;
+        throw new Error(error instanceof Error ? error.message : 'Building could not be saved.');
       }
     }
 
     const created: Building = {
       id: createdId,
-      name: newBuilding.name,
-      location: newBuilding.location,
-      lat: Number(newBuilding.lat),
-      lng: Number(newBuilding.lng),
-      type: newBuilding.type,
-      year: Number(newBuilding.year),
-      floors: Number(newBuilding.floors),
-      description: newBuilding.description || 'Newly registered structural asset under automated monitoring.',
-      incidentNote: newBuilding.incidentNote || 'Baseline telemetry initialized.',
-      status: newBuilding.incidentNote ? 'Inspection Recommended' : 'Low Concern',
-      healthIndex: newBuilding.incidentNote ? 79.0 : 96.0,
+      name,
+      location,
+      lat: latitude,
+      lng: longitude,
+      type: buildingInput.type,
+      year: Number(buildingInput.year),
+      floors: Number(buildingInput.floors),
+      description: buildingInput.description || 'Newly registered structural asset under automated monitoring.',
+      incidentNote: buildingInput.incidentNote || 'Baseline telemetry initialized.',
+      status: buildingInput.incidentNote ? 'Inspection Recommended' : 'Low Concern',
+      healthIndex: buildingInput.incidentNote ? 79.0 : 96.0,
       lastScanDate: 'Today',
-      imageUrl: newBuilding.imageUrl
+      imageUrl: buildingInput.imageUrl
     };
 
-    setBuildings([created, ...buildings]);
+    setBuildings(current => [created, ...current]);
     recordAudit('Registered building', 'Building', created.id, `${created.name} · ${created.location}`);
     setCurrentScreen('map');
-    setNewBuilding({
-      name: '',
-      location: '',
-      lat: -33.8688,
-      lng: 151.2093,
-      type: 'Commercial',
-      year: 2022,
-      floors: 10,
-      description: '',
-      incidentNote: '',
-      imageUrl: 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80'
+  };
+
+  const handleRegisterBuilding = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBuildingRegistrationError(null);
+    try {
+      await registerBuilding(newBuilding);
+      setNewBuilding(DEFAULT_NEW_BUILDING);
+    } catch (error) {
+      setBuildingRegistrationError(error instanceof Error ? error.message : 'Building could not be saved.');
+    }
+  };
+
+  const handleCreateMapPin = async (payload: NewPinPayload) => {
+    const buildingTypes: Building['type'][] = ['Residential', 'Commercial', 'Industrial', 'Institutional', 'Other'];
+    const type = buildingTypes.find(buildingType => buildingType === payload.type) || 'Other';
+    await registerBuilding({
+      ...DEFAULT_NEW_BUILDING,
+      name: payload.name,
+      location: payload.location,
+      lat: payload.lat,
+      lng: payload.lng,
+      type,
+      incidentNote: payload.incidentNote || ''
     });
   };
 
@@ -1979,7 +2011,7 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={handleDemoLogin}
+                  onClick={() => handleDemoLogin()}
                   className="w-full px-5 py-4 bg-[#E5C77B] hover:bg-[#F0D88F] text-[#090909] font-semibold rounded transition-colors inline-flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#B58B3B]/15"
                 >
                   <Zap className="w-4 h-4" />
@@ -2106,7 +2138,7 @@ export default function App() {
             )}
             {!isResettingPassword && <div className="mt-8 pt-6 border-t border-[#222222] text-center">
               <p className="text-xs text-[#A7A39A] mb-3">Local demo workspace — data is stored in this browser</p>
-              <button onClick={handleDemoLogin} className="px-4 py-2 bg-[#191919] hover:bg-[#222222] border border-[#222222] rounded text-xs text-[#E5C77B] font-mono transition-colors inline-flex items-center gap-2">
+              <button onClick={() => handleDemoLogin()} className="px-4 py-2 bg-[#191919] hover:bg-[#222222] border border-[#222222] rounded text-xs text-[#E5C77B] font-mono transition-colors inline-flex items-center gap-2">
                 <Zap className="w-3.5 h-3.5 text-[#B58B3B]" />
                 <span>Enter Demo Workspace</span>
               </button>
@@ -2183,20 +2215,20 @@ export default function App() {
   }
 
   const navItems = [
-    { id: 'dashboard', label: 'Overview / Dashboard', icon: Activity },
-    { id: 'map', label: 'Incident & Asset Map', icon: MapPin },
-    { id: 'buildings', label: 'My Buildings', icon: Building2 },
-    { id: 'add-building', label: 'Add Building', icon: Plus },
-    { id: 'import-buildings', label: 'Import Buildings', icon: FileUp },
-    { id: 'scan', label: 'Record Inspection', icon: Cpu },
-    { id: 'monitor', label: 'IoT Telemetry & Health', icon: Radio, badge: criticalTelemetryCount > 0 ? criticalTelemetryCount : undefined },
-    { id: 'review-queue', label: 'Review Queue', icon: CheckCircle, badge: reviewQueue.length },
-    { id: 'alerts', label: 'Alerts & Tasks', icon: Bell, badge: alerts.filter(a => !a.read).length + dueWorkOrders.length },
-    { id: 'recommendations', label: 'Follow-up Recommendations', icon: Zap },
-    { id: 'work-orders', label: 'Inspection Tasks', icon: ClipboardCheck, badge: openWorkOrders },
-    { id: 'reports', label: 'Reports & History', icon: FileText },
-    { id: 'audit-log', label: 'Audit History', icon: History },
-    { id: 'settings', label: 'Settings', icon: Settings },
+    { id: 'dashboard', label: 'Overview', icon: Activity, section: 'Overview' },
+    { id: 'map', label: 'Incident & Asset Map', icon: MapPin, section: 'Overview' },
+    { id: 'buildings', label: 'My Buildings', icon: Building2, section: 'Portfolio' },
+    { id: 'add-building', label: 'Add Building', icon: Plus, section: 'Portfolio' },
+    { id: 'import-buildings', label: 'Import Buildings', icon: FileUp, section: 'Portfolio' },
+    { id: 'scan', label: 'Record Inspection', icon: Cpu, section: 'Operations' },
+    { id: 'monitor', label: 'IoT Telemetry & Health', icon: Radio, badge: criticalTelemetryCount > 0 ? criticalTelemetryCount : undefined, section: 'Operations' },
+    { id: 'review-queue', label: 'Review Queue', icon: CheckCircle, badge: reviewQueue.length, section: 'Operations' },
+    { id: 'alerts', label: 'Alerts & Tasks', icon: Bell, badge: alerts.filter(a => !a.read).length + dueWorkOrders.length, section: 'Operations' },
+    { id: 'recommendations', label: 'Recommendations', icon: Zap, section: 'Operations' },
+    { id: 'work-orders', label: 'Inspection Tasks', icon: ClipboardCheck, badge: openWorkOrders, section: 'Operations' },
+    { id: 'reports', label: 'Reports & History', icon: FileText, section: 'Governance' },
+    { id: 'audit-log', label: 'Audit History', icon: History, section: 'Governance' },
+    { id: 'settings', label: 'Settings', icon: Settings, section: 'Governance' },
   ].filter(item => item.id === 'add-building'
     || item.id === 'import-buildings'
       ? canManageBuildings
@@ -2206,17 +2238,19 @@ export default function App() {
       ? canEdit
       : true);
 
+  const navSections = ['Overview', 'Portfolio', 'Operations', 'Governance'] as const;
+
   return (
-    <div className="min-h-screen bg-[#090909] text-[#F5F0E5] flex font-sans selection:bg-[#B58B3B] selection:text-white">
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#191919] border-r border-[#222222] transform transition-transform duration-300 ease-in-out lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="h-16 px-6 border-b border-[#222222] flex items-center justify-between">
+    <div className="min-h-screen bg-transparent text-[#F5F0E5] flex font-sans selection:bg-[#B58B3B]/40 selection:text-[#F5F0E5]">
+      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#111111]/95 backdrop-blur-xl border-r border-white/[0.06] transform transition-transform duration-300 ease-in-out lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="h-16 px-5 border-b border-white/[0.06] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded bg-[#B58B3B]/10 border border-[#B58B3B]/40 flex items-center justify-center text-[#E5C77B]">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#E5C77B]/20 to-[#B58B3B]/5 border border-[#B58B3B]/40 flex items-center justify-center text-[#E5C77B] shadow-inner shadow-[#E5C77B]/10">
               <ShieldAlert className="w-4 h-4" />
             </div>
             <div>
-              <span className="font-bold tracking-wider text-sm text-[#F5F0E5]">ARCHONIX</span>
-              <span className="block text-[10px] text-[#B58B3B] font-mono">WORLD</span>
+              <span className="font-bold tracking-[0.14em] text-sm text-[#F5F0E5]">ARCHONIX</span>
+              <span className="block text-[9px] text-[#B58B3B] font-mono tracking-[0.2em]">WORLD TELEMETRY</span>
             </div>
           </div>
           <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-[#A7A39A] hover:text-[#F5F0E5]">
@@ -2224,22 +2258,22 @@ export default function App() {
           </button>
         </div>
 
-        <div className="p-4 space-y-1 overflow-y-auto max-h-[calc(100vh-4rem)]">
+        <div className="p-3.5 space-y-4 overflow-y-auto max-h-[calc(100vh-4rem)]">
           {isDemoSession && (
-            <div className="mx-0 mb-4 p-3 rounded border border-amber-500/40 bg-amber-500/10">
+            <div className="p-3 rounded-xl border border-amber-500/25 bg-gradient-to-b from-amber-500/10 to-amber-500/[0.03]">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className="relative flex h-2 w-2">
                     <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
                     <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
                   </span>
-                  <span className="text-xs font-bold text-amber-200">Demo workspace</span>
+                  <span className="text-xs font-semibold text-amber-200">Demo workspace</span>
                 </div>
-                <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-[#090909]/40 text-[9px] font-mono text-amber-300">
+                <span className="px-1.5 py-0.5 rounded-md border border-amber-500/30 bg-[#090909]/60 text-[9px] font-mono text-amber-300">
                   LOCAL
                 </span>
               </div>
-              <p className="mt-2 text-[10px] leading-relaxed text-[#A7A39A]">
+              <p className="mt-1.5 text-[10px] leading-relaxed text-[#A7A39A]">
                 Sample data is stored in this browser only.
               </p>
               <button
@@ -2247,42 +2281,59 @@ export default function App() {
                 onClick={() => {
                   if (window.confirm('Reset all demo data to the preloaded sample workspace?')) resetDemoData();
                 }}
-                className="mt-3 w-full px-3 py-2 rounded border border-amber-500/30 bg-[#090909]/40 text-[10px] font-mono text-amber-200 hover:bg-amber-500/10 transition-colors"
+                className="mt-2.5 w-full px-3 py-1.5 rounded-lg border border-amber-500/25 bg-[#090909]/50 text-[10px] font-mono text-amber-200 hover:bg-amber-500/15 transition-colors cursor-pointer"
               >
                 Reset Demo Data
               </button>
             </div>
           )}
-          <div className="px-3 py-2 text-[10px] font-mono text-[#A7A39A] uppercase tracking-wider">Navigation</div>
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentScreen === item.id;
+
+          {navSections.map((section) => {
+            const sectionItems = navItems.filter((item) => item.section === section);
+            if (sectionItems.length === 0) return null;
             return (
-              <button
-                key={item.id}
-                onClick={() => {
-                  setCurrentScreen(item.id as Screen);
-                  if (window.innerWidth < 1024) setSidebarOpen(false);
-                }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded text-xs font-medium transition-colors ${isActive ? 'bg-[#B58B3B]/15 text-[#E5C77B] border border-[#B58B3B]/30' : 'text-[#A7A39A] hover:bg-[#222222] hover:text-[#F5F0E5]'}`}
-              >
-                <div className="flex items-center gap-3">
-                  <Icon className={`w-4 h-4 ${isActive ? 'text-[#E5C77B]' : 'text-[#A7A39A]'}`} />
-                  <span>{item.label}</span>
-                </div>
-                {item.badge ? (
-                  <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-red-500/20 text-red-400 font-mono border border-red-500/30">
-                    {item.badge}
-                  </span>
-                ) : null}
-              </button>
+              <div key={section} className="space-y-0.5">
+                <div className="px-3 pb-1 text-[10px] font-mono text-[#7C7870] uppercase tracking-[0.14em]">{section}</div>
+                {sectionItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = currentScreen === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        setCurrentScreen(item.id as Screen);
+                        if (window.innerWidth < 1024) setSidebarOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-gradient-to-r from-[#B58B3B]/20 to-[#B58B3B]/5 text-[#F5E6BE] border border-[#B58B3B]/35 shadow-sm shadow-[#B58B3B]/10'
+                          : 'text-[#A7A39A] border border-transparent hover:bg-white/[0.04] hover:text-[#F5F0E5]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Icon className={`w-4 h-4 transition-colors ${isActive ? 'text-[#E5C77B]' : 'text-[#7C7870]'}`} />
+                        <span>{item.label}</span>
+                      </div>
+                      {item.badge ? (
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-red-500/20 text-red-300 font-mono border border-red-500/30">
+                          {item.badge}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
             );
           })}
 
-          <div className="pt-6 mt-6 border-t border-[#222222]">
-            <div className="px-3 py-2 mt-1 bg-[#222222]/50 rounded border border-[#222222]">
-              <div className="text-xs font-medium text-[#F5F0E5] truncate">{currentUser?.name || 'Demo Analyst'}</div>
-              <div className="text-[10px] text-[#A7A39A] truncate font-mono">{isDemoSession ? 'DEMO' : currentUser?.role.replaceAll('_', ' ')}</div>
+          <div className="pt-4 mt-4 border-t border-white/[0.06]">
+            <div className="px-3 py-2.5 bg-white/[0.03] rounded-xl border border-white/[0.06]">
+              <div className="text-xs font-semibold text-[#F5F0E5] truncate">{currentUser?.name || 'Demo Analyst'}</div>
+              <div className="text-[10px] text-[#A7A39A] truncate font-mono mt-0.5">
+                {isDemoSession
+                  ? currentUser?.role === 'DEMO' ? 'DEMO' : currentUser?.role || 'DEMO'
+                  : currentUser?.role.replaceAll('_', ' ')}
+              </div>
             </div>
             <button onClick={() => {
               if (!isDemoSession && supabase) void supabase.auth.signOut();
@@ -2295,7 +2346,7 @@ export default function App() {
               setOrganizationName('');
               setOrganizationLoading(false);
               setCurrentScreen('login');
-            }} className="w-full mt-3 flex items-center gap-3 px-3 py-2 rounded text-xs text-red-400 hover:bg-red-500/10 transition-colors">
+            }} className="w-full mt-2 flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer">
               <LogOut className="w-4 h-4" />
               <span>Sign Out</span>
             </button>
@@ -2304,24 +2355,28 @@ export default function App() {
       </aside>
 
       <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:pl-64' : 'pl-0'}`}>
-        <header className="h-16 bg-[#191919] border-b border-[#222222] px-6 flex items-center justify-between sticky top-0 z-40">
+        <header className="h-16 bg-[#111111]/85 backdrop-blur-md border-b border-white/[0.06] px-6 flex items-center justify-between sticky top-0 z-40">
           <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded bg-[#222222] text-[#A7A39A] hover:text-[#F5F0E5] transition-colors">
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] text-[#A7A39A] hover:text-[#F5F0E5] transition-colors cursor-pointer">
               <Menu className="w-4 h-4" />
             </button>
-            <div className="hidden sm:flex items-center gap-2 text-xs text-[#A7A39A] font-mono">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>{isDemoSession ? 'LOCAL DEMO DATA • BROWSER STORAGE' : `${organizationName.toUpperCase()} • AUTHENTICATED WORKSPACE`}</span>
+            <div className="hidden sm:flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06] text-[11px] text-[#A7A39A] font-mono">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.6)]"></span>
+              <span>
+                {isDemoSession
+                  ? `LOCAL DEMO • ${currentUser?.role === 'DEMO' ? 'DEMO' : currentUser?.role || 'DEMO'}`
+                  : `${organizationName.toUpperCase()} • WORKSPACE`}
+              </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <button
               onClick={() => {
                 setMonitorActiveTab('telemetry');
                 setCurrentScreen('monitor');
               }}
-              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#222222] hover:bg-[#333333] text-xs font-mono text-[#F5F0E5] transition-colors cursor-pointer"
+              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.06] text-xs font-mono text-[#F5F0E5] transition-all cursor-pointer"
             >
               <Radio className={`w-3.5 h-3.5 ${criticalTelemetryCount > 0 ? 'text-red-400 animate-pulse' : 'text-emerald-400'}`} />
               <span className={criticalTelemetryCount > 0 ? 'text-red-300 font-bold' : ''}>
@@ -2330,20 +2385,20 @@ export default function App() {
             </button>
             <button
               onClick={() => setCurrentScreen('map')}
-              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#B58B3B]/15 hover:bg-[#B58B3B]/25 border border-[#B58B3B]/40 text-xs font-mono text-[#E5C77B] transition-colors cursor-pointer"
+              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#B58B3B]/15 hover:bg-[#B58B3B]/25 border border-[#B58B3B]/40 text-xs font-mono text-[#E5C77B] transition-all cursor-pointer shadow-sm shadow-[#B58B3B]/10"
               title="Open Conversational Spatial AI (⌘K)"
             >
               <Sparkles className="w-3.5 h-3.5 text-[#E5C77B]" />
               <span>Spatial AI (⌘K)</span>
             </button>
-            <button onClick={() => setCurrentScreen('map')} className="px-3 py-1.5 rounded bg-[#222222] text-[#E5C77B] hover:bg-[#333333] text-xs font-mono flex items-center gap-1.5">
+            <button onClick={() => setCurrentScreen('map')} className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.06] text-[#E5C77B] text-xs font-mono flex items-center gap-1.5 transition-all cursor-pointer">
               <MapPin className="w-3.5 h-3.5" />
               <span>Live GIS Map</span>
             </button>
-            <button onClick={() => setCurrentScreen('alerts')} className="relative p-2 rounded bg-[#222222] text-[#A7A39A] hover:text-[#F5F0E5] transition-colors">
+            <button onClick={() => setCurrentScreen('alerts')} className="relative p-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.06] text-[#A7A39A] hover:text-[#F5F0E5] transition-all cursor-pointer">
               <Bell className="w-4 h-4" />
               {alerts.filter(a => !a.read).length + dueWorkOrders.length > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center">
+                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center shadow-sm shadow-red-500/40">
                   {alerts.filter(a => !a.read).length + dueWorkOrders.length}
                 </span>
               )}
@@ -2351,78 +2406,71 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 p-6 lg:p-8 bg-[#090909] overflow-y-auto">
+        <main className="flex-1 p-6 lg:p-8 bg-transparent overflow-y-auto">
           {buildingsLoading && (
-            <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
-              Loading buildings from the Neon database…
+            <div role="status" className="mb-4 p-3 rounded-xl border border-white/[0.06] bg-[#141414] text-xs text-[#A7A39A]">
+              Loading buildings from the database…
             </div>
           )}
           {buildingsError && (
-            <div role="alert" className="mb-4 p-3 rounded border border-amber-500/30 bg-amber-500/10 text-xs text-amber-200">
+            <div role="alert" className="mb-4 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs text-amber-200">
               Building data could not be loaded from Neon: {buildingsError} {isDemoSession ? 'Using local demo buildings instead.' : 'Showing local buildings, if available.'}
             </div>
           )}
-          {!buildingsLoading && !buildingsError && (
-            <div role="status" className="mb-4 p-3 rounded border border-[#222222] bg-[#191919] text-xs text-[#A7A39A]">
-              {supabaseBuildings.length > 0
-                ? `Loaded ${supabaseBuildings.length} buildings from the Neon database.`
-                : isDemoSession
-                  ? 'Demo workspace; using local sample buildings.'
-                  : activeBuildings.length > 0
-                    ? 'Showing available local or database buildings.'
-                    : 'No buildings are available from the database yet.'}
-            </div>
-          )}
-          {storageError && <div role="alert" className="mb-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some browser data could not be read or saved: {storageError}. Export or copy important records before leaving.</div>}
+          {storageError && <div role="alert" className="mb-4 p-3 rounded-xl border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some browser data could not be read or saved: {storageError}. Export or copy important records before leaving.</div>}
           {currentScreen === 'map' && (
-            <WorldMap
-              buildings={activeBuildings}
-              scans={scans}
-              canScan={canEdit}
-              selectedBuildingId={activeSelectedBuildingId || undefined}
-              onSelectBuilding={(building) => setSelectedBuildingId(building.id)}
-              onMapClick={canManageBuildings ? (lat, lng) => {
-                setNewBuilding(current => ({ ...current, lat, lng }));
-              } : undefined}
-              onScan={(id) => {
-                if (!canEdit) return;
-                setSelectedBuildingId(id);
-                setCurrentScreen('scan');
-              }}
-              onMemory={(id) => {
-                setSelectedBuildingId(id);
-                setCurrentScreen('monitor');
-              }}
-              telemetryData={telemetryMap}
-              isStreamingTelemetry={isTelemetryStreaming}
-              onToggleStreamingTelemetry={() => setIsTelemetryStreaming(s => !s)}
-              onSimulateTelemetry={handleSimulateTelemetry}
-              onOpenTelemetryMonitor={(id) => {
-                setSelectedBuildingId(id);
-                setMonitorActiveTab('telemetry');
-                setCurrentScreen('monitor');
-              }}
-            />
+            <React.Suspense fallback={<div className="p-8 text-center text-sm text-[#A7A39A]" role="status">Loading map…</div>}>
+              <WorldMap
+                buildings={activeBuildings}
+                scans={scans}
+                canScan={canEdit}
+                selectedBuildingId={activeSelectedBuildingId || undefined}
+                onSelectBuilding={(building) => setSelectedBuildingId(building.id)}
+                onMapClick={canManageBuildings ? (lat, lng) => {
+                  setNewBuilding(current => ({ ...current, lat, lng }));
+                } : undefined}
+                onCreatePin={handleCreateMapPin}
+                onScan={(id) => {
+                  if (!canEdit) return;
+                  setSelectedBuildingId(id);
+                  setCurrentScreen('scan');
+                }}
+                onMemory={(id) => {
+                  setSelectedBuildingId(id);
+                  setCurrentScreen('monitor');
+                }}
+                telemetryData={telemetryMap}
+                isStreamingTelemetry={isTelemetryStreaming}
+                onToggleStreamingTelemetry={() => setIsTelemetryStreaming(s => !s)}
+                onSimulateTelemetry={handleSimulateTelemetry}
+                onOpenTelemetryMonitor={(id) => {
+                  setSelectedBuildingId(id);
+                  setMonitorActiveTab('telemetry');
+                  setCurrentScreen('monitor');
+                }}
+              />
+            </React.Suspense>
           )}
 
           {currentScreen === 'dashboard' && (
-            <div className="space-y-8">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-8 animate-screen-in">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-white/[0.06]">
                 <div>
+                  <p className="text-[11px] font-mono uppercase tracking-[0.18em] text-[#B58B3B] mb-1">Portfolio Command</p>
                   <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Structural Command Dashboard</h1>
-                  <p className="text-sm text-[#A7A39A]">Building status, saved inspection records, alerts, and follow-up work.</p>
+                  <p className="text-sm text-[#A7A39A] mt-1">Building status, saved inspection records, alerts, and follow-up work.</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setCurrentScreen('map')}
-                    className="px-4 py-3 bg-[#191919] hover:bg-[#222222] border border-[#B58B3B]/40 text-[#E5C77B] font-semibold text-xs rounded transition-colors flex items-center gap-2 cursor-pointer"
+                    className="px-4 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-[#B58B3B]/40 text-[#E5C77B] font-semibold text-xs rounded-lg transition-all flex items-center gap-2 cursor-pointer"
                   >
                     <MapPin className="w-4 h-4" />
                     <span>VIEW INCIDENT MAP</span>
                   </button>
                   {canEdit && <button
                     onClick={() => setCurrentScreen('scan')}
-                    className="px-5 py-3 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center justify-center gap-2 shadow-lg shadow-[#B58B3B]/20 cursor-pointer"
+                    className="px-5 py-2.5 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] text-[#090909] font-semibold text-xs rounded-lg transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#B58B3B]/20 cursor-pointer"
                   >
                     <Cpu className="w-4 h-4" />
                     <span>RECORD INSPECTION</span>
@@ -2430,56 +2478,56 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Total Buildings</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{activeBuildings.length}</div>
-                  <div className="text-[10px] text-[#A7A39A] mt-2">{buildingsWithRecords} with inspection records</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all">
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Total Buildings</div>
+                  <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{activeBuildings.length}</div>
+                  <div className="text-[11px] text-[#A7A39A] mt-2">{buildingsWithRecords} with inspection records</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Health Index</div>
-                  <div className="text-2xl font-bold text-[#E5C77B] font-mono">{portfolioHealthAverage}</div>
-                  <div className="text-[10px] text-[#A7A39A] mt-2">Portfolio Average</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl transition-all">
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Health Index</div>
+                  <div className="text-3xl font-bold text-[#E5C77B] font-mono tracking-tight">{portfolioHealthAverage}</div>
+                  <div className="text-[11px] text-[#A7A39A] mt-2">Portfolio Average</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Active Alerts</div>
-                  <div className="text-2xl font-bold text-red-400 font-mono">{alerts.filter(a => !a.read).length}</div>
-                  <div className="text-[10px] text-red-400 mt-2">Requires Review</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-red-500/35 rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('alerts')}>
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Active Alerts</div>
+                  <div className="text-3xl font-bold text-red-400 font-mono tracking-tight">{alerts.filter(a => !a.read).length}</div>
+                  <div className="text-[11px] text-red-400/90 mt-2">Requires Review</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded cursor-pointer hover:border-[#B58B3B]/40 transition-colors" onClick={() => { setMonitorActiveTab('telemetry'); setCurrentScreen('monitor'); }}>
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1 flex items-center justify-between">
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl transition-all cursor-pointer" onClick={() => { setMonitorActiveTab('telemetry'); setCurrentScreen('monitor'); }}>
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2 flex items-center justify-between">
                     <span>IoT Telemetry</span>
-                    <Radio className={`w-3 h-3 ${isTelemetryStreaming ? 'text-emerald-400 animate-pulse' : 'text-[#777777]'}`} />
+                    <Radio className={`w-3.5 h-3.5 ${isTelemetryStreaming ? 'text-emerald-400 animate-pulse' : 'text-[#777777]'}`} />
                   </div>
-                  <div className={`text-2xl font-bold font-mono ${criticalTelemetryCount > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                  <div className={`text-3xl font-bold font-mono tracking-tight ${criticalTelemetryCount > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                     {criticalTelemetryCount > 0 ? `${criticalTelemetryCount} CRIT` : 'NOMINAL'}
                   </div>
-                  <div className="text-[10px] text-[#A7A39A] mt-2">{activeBuildings.length * 4} sensors online</div>
+                  <div className="text-[11px] text-[#A7A39A] mt-2">{activeBuildings.length * 4} sensors online</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Scans Completed</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{scans.length}</div>
-                  <div className="text-[10px] text-emerald-400 mt-2">Recorded inspections</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all">
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Scans Completed</div>
+                  <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{scans.length}</div>
+                  <div className="text-[11px] text-emerald-400 mt-2">Recorded inspections</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Attention Required</div>
-                  <div className="text-2xl font-bold text-amber-400 font-mono">{activeBuildings.filter(building => building.status === 'Inspection Recommended' || building.status === 'Urgent Assessment').length}</div>
-                  <div className="text-[10px] text-amber-400 mt-2">Buildings need review</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-amber-500/35 rounded-xl transition-all">
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Attention Required</div>
+                  <div className="text-3xl font-bold text-amber-400 font-mono tracking-tight">{activeBuildings.filter(building => building.status === 'Inspection Recommended' || building.status === 'Urgent Assessment').length}</div>
+                  <div className="text-[11px] text-amber-400/90 mt-2">Buildings need review</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Awaiting Inspection</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{openWorkOrders}</div>
-                  <div className={`text-[10px] mt-2 ${dueWorkOrders.length ? 'text-amber-300' : 'text-[#A7A39A]'}`}>{dueWorkOrders.length} due today or overdue</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('work-orders')}>
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Awaiting Inspection</div>
+                  <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{openWorkOrders}</div>
+                  <div className={`text-[11px] mt-2 ${dueWorkOrders.length ? 'text-amber-300' : 'text-[#A7A39A]'}`}>{dueWorkOrders.length} due today or overdue</div>
                 </div>
-                <div className="p-4 bg-[#191919] border border-[#222222] rounded">
-                  <div className="text-xs text-[#A7A39A] font-mono mb-1">Review Queue</div>
-                  <div className="text-2xl font-bold text-[#F5F0E5] font-mono">{reviewQueue.length}</div>
-                  <div className="text-[10px] text-[#A7A39A] mt-2">Submitted inspections</div>
+                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('review-queue')}>
+                  <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Review Queue</div>
+                  <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{reviewQueue.length}</div>
+                  <div className="text-[11px] text-[#A7A39A] mt-2">Submitted inspections</div>
                 </div>
               </div>
 
               {/* Continuous Structural Health Telemetry Stream Preview */}
-              <section className="p-5 bg-[#141414] border border-[#222222] rounded space-y-4">
+              <section className="p-5 bg-[#141414] border border-white/[0.07] rounded-xl space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className={`p-2 rounded border ${criticalTelemetryCount > 0 ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
@@ -3275,7 +3323,16 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <h3 className="font-bold text-[#F5F0E5] text-sm">{alt.title} — <span className="text-[#E5C77B]">{alt.buildingName}</span></h3>
                         {alt.source === 'demo' && <span className="text-[9px] text-[#A7A39A]">DEMO</span>}
-                        {!alt.read && <span className="text-[9px] uppercase text-amber-300">Unread</span>}
+                        {!alt.read && <span className="text-[9px] uppercase text-amber-300">Unread</span>}tos, tasks, alerts, checklists, and audit history. If those remain local for the presentation, label them clearly as browser-only and keep all claims of cross-user/live persistence out of the UI.
+                        Wire map pin creation to the same validated app handler as manual registration; surface request failures and refresh the portfolio after a successful save.
+                        Fix Enter behavior in the spatial search, and label the SQL panel as a non-executed example/translation.
+                        Demo reliability and credibility
+                        5. Make the demo/live distinction explicit for operator sign-in, telemetry, seeded health scores, inspection recommendations, and the landing page’s Neon/PostGIS claim.
+                        6. Document required environment variables and deployment prerequisites, including Supabase migration, Neon schema/credentials (if retained), and MapTiler configuration. Test these in the actual presentation environment.
+                        7. Add smoke/E2E coverage for demo entry, building creation/import, map pin save/failure, inspection/review, task reminders, report printing, and configured sign-in/onboarding.
+                        8. Resolve the lint warnings and verify the external map/geocoding services and browser notification permissions on the target machine.
+                        
+                        Bottom line: this is a substantial interactive prototype with working-looking local workflows and compile/build validation, but the repository provides no evidence of a complete live end-to-end setup. The Neon access boundary, split persistence, and misleading live/demo indicators should be addressed before presenting it as a production-connected system.
                       </div>
                       <p className="text-xs text-[#A7A39A] mt-1">{alt.description}</p>
                       <p className="text-[11px] text-[#A7A39A] mt-2">{alt.recommendation} · {alt.timestamp}</p>
