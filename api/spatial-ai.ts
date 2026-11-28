@@ -39,6 +39,8 @@ interface GeminiSpatialPayload {
   intent?: string;
 }
 
+export const config = { maxDuration: 30 };
+
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -128,7 +130,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           ],
           generationConfig: {
             temperature: 0.2,
-            maxOutputTokens: 512,
+            maxOutputTokens: 4096,
             responseMimeType: 'application/json',
             ...(model === 'gemini-2.5-flash' ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
           },
@@ -149,10 +151,29 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const data = (await response.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
     };
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    const parsed = JSON.parse(rawText) as GeminiSpatialPayload;
+    const candidate = data.candidates?.[0];
+    const rawText = (candidate?.content?.parts || [])
+      .filter((part) => !part.thought)
+      .map((part) => part.text || '')
+      .join('')
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+
+    if (!rawText) {
+      return res.status(502).json({ error: `Gemini returned no text (finishReason: ${candidate?.finishReason || 'unknown'})` });
+    }
+
+    let parsed: GeminiSpatialPayload;
+    try {
+      parsed = JSON.parse(rawText) as GeminiSpatialPayload;
+    } catch {
+      return res.status(502).json({
+        error: `Gemini returned incomplete JSON (finishReason: ${candidate?.finishReason || 'unknown'}): ${rawText.slice(0, 80)}`,
+      });
+    }
 
     const validIds = new Set(buildings.map((b) => b.id));
     const matchedBuildingIds = Array.isArray(parsed.matchedBuildingIds)
