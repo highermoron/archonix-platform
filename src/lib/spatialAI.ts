@@ -93,6 +93,7 @@ interface GeminiSpatialResponse {
   hints?: string[];
   appliedClauses?: string[];
   intent?: string;
+  error?: string;
 }
 
 async function queryGeminiSpatialAI(
@@ -100,7 +101,7 @@ async function queryGeminiSpatialAI(
   buildings: SpatialBuilding[],
   findings: StructuralFinding[],
   telemetryData?: Record<string, BuildingTelemetry>
-): Promise<GeminiSpatialResponse | null> {
+): Promise<{ data: GeminiSpatialResponse | null; fallbackReason?: string }> {
   try {
     const telemetrySummary: Record<string, { overallStatus?: string; activeAlert?: { title?: string; severity?: string } }> = {};
     if (telemetryData) {
@@ -141,13 +142,19 @@ async function queryGeminiSpatialAI(
       }),
     });
 
-    if (!response.ok) return null;
     const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) return null;
+    if (!contentType.includes('application/json')) {
+      return { data: null, fallbackReason: `Local engine used (/api/spatial-ai returned ${response.status})` };
+    }
 
-    return (await response.json()) as GeminiSpatialResponse;
-  } catch {
-    return null;
+    const json = (await response.json()) as GeminiSpatialResponse;
+    if (!response.ok) {
+      return { data: null, fallbackReason: json.error || `Gemini endpoint returned ${response.status}` };
+    }
+
+    return { data: json };
+  } catch (err: unknown) {
+    return { data: null, fallbackReason: err instanceof Error ? err.message : 'Network error calling /api/spatial-ai' };
   }
 }
 
@@ -167,7 +174,7 @@ export async function processSpatialAIQuery(
   const outcome = matchBuildings(buildings, criteria, findings, telemetryData);
   const buildingsById = new Map(buildings.map(building => [building.id, building]));
 
-  const gemini = await queryGeminiSpatialAI(rawQuery, buildings, findings, telemetryData);
+  const { data: gemini, fallbackReason } = await queryGeminiSpatialAI(rawQuery, buildings, findings, telemetryData);
 
   let finalMatches = outcome.matches;
   let finalSummary = buildSummary(criteria, outcome);
@@ -175,6 +182,10 @@ export async function processSpatialAIQuery(
   let finalClauses = criteria.clauses;
   let finalIntent = 'spatial_filter_and_focus';
   const finalNotes = [...notes];
+
+  if (fallbackReason) {
+    finalNotes.push(`AI note: ${fallbackReason}`);
+  }
 
   if (gemini && gemini.summary) {
     finalSummary = gemini.summary;

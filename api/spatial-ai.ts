@@ -44,12 +44,21 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
-    return res.status(503).json({ error: 'GEMINI_API_KEY is not configured' });
+    return res.status(503).json({ error: 'GEMINI_API_KEY is not configured in Vercel environment variables' });
   }
 
-  const body = req.body || {};
+  let body: NonNullable<ApiRequest['body']> = {};
+  if (typeof req.body === 'string') {
+    try {
+      body = JSON.parse(req.body) as NonNullable<ApiRequest['body']>;
+    } catch {
+      body = {};
+    }
+  } else if (req.body && typeof req.body === 'object') {
+    body = req.body;
+  }
   const query = String(body.query || '').trim();
   const buildings = Array.isArray(body.buildings) ? body.buildings : [];
   const findings = Array.isArray(body.findings) ? body.findings : [];
@@ -95,31 +104,44 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   ].join('\n');
 
   try {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: `${systemPrompt}\n\nUSER QUERY:\n${query}\n\nPORTFOLIO DATA:\n${JSON.stringify(portfolioContext)}`,
-              },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.2,
-          responseMimeType: 'application/json',
-        },
-      }),
-    });
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    let response: Response | null = null;
+    let lastError = '';
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      return res.status(502).json({ error: `Gemini API error (${response.status}): ${errText.slice(0, 200)}` });
+    for (const model of models) {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const candidateRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `${systemPrompt}\n\nUSER QUERY:\n${query}\n\nPORTFOLIO DATA:\n${JSON.stringify(portfolioContext)}`,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: 'application/json',
+          },
+        }),
+      });
+
+      if (candidateRes.ok) {
+        response = candidateRes;
+        break;
+      }
+      const errText = await candidateRes.text().catch(() => '');
+      lastError = `${model} (${candidateRes.status}): ${errText.slice(0, 180)}`;
+      if (candidateRes.status !== 404) break;
+    }
+
+    if (!response) {
+      return res.status(502).json({ error: `Gemini API error — ${lastError}` });
     }
 
     const data = (await response.json()) as {
