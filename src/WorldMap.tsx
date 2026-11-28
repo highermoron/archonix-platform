@@ -48,7 +48,7 @@ type WorldMapProps = {
   selectedBuildingId?: string;
   onSelectBuilding?: (building: MapBuilding) => void;
   onMapClick?: (lat: number, lng: number) => void;
-  onCreatePin?: (payload: NewPinPayload) => Promise<void> | void;
+  onCreatePin: (payload: NewPinPayload) => Promise<void> | void;
   telemetryData?: Record<string, BuildingTelemetry>;
   isStreamingTelemetry?: boolean;
   onToggleStreamingTelemetry?: () => void;
@@ -229,6 +229,7 @@ export default function WorldMap({
   const [newIncidentNote, setNewIncidentNote] = useState('');
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [isSavingPin, setIsSavingPin] = useState(false);
+  const [pinSaveError, setPinSaveError] = useState<string | null>(null);
   const [addressQuery, setAddressQuery] = useState('');
   const [addressResults, setAddressResults] = useState<Array<{
     id: string;
@@ -261,19 +262,7 @@ export default function WorldMap({
 
   useEffect(() => {
     const query = addressQuery.trim();
-    if (query.length < 3) {
-      setAddressResults([]);
-      setIsSearchingAddress(false);
-      setAddressSearchError(null);
-      return;
-    }
-
-    if (!maptilerKey) {
-      setAddressResults([]);
-      setIsSearchingAddress(false);
-      setAddressSearchError('Address suggestions are unavailable: MapTiler API key is not configured.');
-      return;
-    }
+    if (query.length < 3 || !maptilerKey) return;
 
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
@@ -329,6 +318,10 @@ export default function WorldMap({
       controller.abort();
     };
   }, [addressQuery, maptilerKey]);
+
+  const displayedAddressSearchError = addressQuery.trim().length >= 3 && !maptilerKey
+    ? 'Address suggestions are unavailable: MapTiler API key is not configured.'
+    : addressSearchError;
 
   // Reverse-geocode clicked/dragged pin so user doesn't need to type a street address
   const resolveSuburbFromCoords = useCallback(async (lat: number, lng: number) => {
@@ -431,6 +424,7 @@ export default function WorldMap({
     setNewBuildingName('');
     setNewBuildingLocation('');
     setNewIncidentNote('');
+    setPinSaveError(null);
   }, []);
 
   const handleSpatialResult = useCallback((result: SpatialAIResult | null) => {
@@ -622,13 +616,13 @@ export default function WorldMap({
     if (map) map.flyTo([building.lat as number, building.lng as number], Math.max(map.getZoom(), 15), { duration: 1.2 });
   }, [selectedId, visible]);
 
-  const focusBuilding = (b: MapBuilding) => {
+  const focusBuilding = useCallback((b: MapBuilding) => {
     setIsRegisterDrawerOpen(false);
     setSelectedId(b.id);
     onSelectBuildingRef.current?.(b);
     const map = mapRef.current;
     if (map) map.flyTo([b.lat as number, b.lng as number], Math.max(map.getZoom(), 15), { duration: 1.2 });
-  };
+  }, [setSelectedId]);
 
   const findings = useMemo(() => {
     return buildStructuralFindings(buildings, scans || []);
@@ -637,7 +631,7 @@ export default function WorldMap({
   const handleFocusBuildingById = useCallback((buildingId: string) => {
     const b = plotted.find(item => item.id === buildingId);
     if (b) focusBuilding(b);
-  }, [plotted]);
+  }, [focusBuilding, plotted]);
 
   const fitAll = () => {
     const map = mapRef.current;
@@ -684,7 +678,11 @@ export default function WorldMap({
 
   const handleSaveNewPin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pickedCoordinates || !newBuildingName.trim()) return;
+    setPinSaveError(null);
+    if (!pickedCoordinates || !newBuildingName.trim()) {
+      setPinSaveError('Choose a map location and enter a building name.');
+      return;
+    }
 
     setIsSavingPin(true);
     try {
@@ -697,24 +695,10 @@ export default function WorldMap({
         incidentNote: newIncidentNote.trim() || undefined,
       };
 
-      if (onCreatePin) {
-        await onCreatePin(payload);
-      } else {
-        // Direct fallback POST to Neon API if onCreatePin prop isn't wired yet
-        await fetch('/api/buildings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            building_code: `ARC-${Date.now().toString().slice(-6)}`,
-            name: payload.name,
-            suburb: payload.location,
-            latitude: payload.lat,
-            longitude: payload.lng,
-            building_classification: payload.type,
-          }),
-        });
-      }
+      await onCreatePin(payload);
       clearTargetPin();
+    } catch (error) {
+      setPinSaveError(error instanceof Error ? error.message : 'Building could not be saved.');
     } finally {
       setIsSavingPin(false);
     }
@@ -734,8 +718,41 @@ export default function WorldMap({
         onFocusBuilding={handleFocusBuildingById}
       />
 
+      {/* Quick-Fly Global Asset Bar */}
+      {plotted.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <button
+            type="button"
+            onClick={() => mapRef.current?.flyTo([20, 10], 2, { duration: 1.2 })}
+            className="shrink-0 px-3 py-1.5 rounded-full liquid-glass-card text-[11px] font-mono text-[#E5C77B] hover:text-[#F5E6BE] transition-all cursor-pointer"
+          >
+            Global View
+          </button>
+          {plotted.slice(0, 10).map((b) => {
+            const dotColor =
+              b.status === 'Urgent Assessment'
+                ? 'bg-red-400'
+                : b.status === 'Inspection Recommended' || b.status === 'Monitoring Required'
+                  ? 'bg-amber-400'
+                  : 'bg-emerald-400';
+            const shortLabel = b.name.replace(/\s*Demo Structure$/i, '');
+            return (
+              <button
+                key={b.id}
+                type="button"
+                onClick={() => handleFocusBuildingById(b.id)}
+                className="shrink-0 px-3 py-1.5 rounded-full liquid-glass-card text-[11px] font-mono text-[#D8D3C8] hover:text-[#F5F0E5] flex items-center gap-1.5 transition-all cursor-pointer"
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+                <span>{shortLabel}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Top IoT Structural Health Telemetry & Event Simulator HUD */}
-      <div className="p-3.5 bg-[#141414] border border-[#222222] rounded flex flex-wrap items-center justify-between gap-3">
+      <div className="p-3.5 liquid-glass-card rounded-xl flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <Radio className={`w-4 h-4 ${isStreamingTelemetry ? 'text-emerald-400 animate-pulse' : 'text-[#777777]'}`} />
@@ -881,8 +898,13 @@ export default function WorldMap({
                 type="search"
                 value={addressQuery}
                 onChange={(event) => {
-                  setAddressQuery(event.target.value);
+                  const value = event.target.value;
+                  setAddressQuery(value);
                   setAddressSearchError(null);
+                  if (value.trim().length < 3) {
+                    setAddressResults([]);
+                    setIsSearchingAddress(false);
+                  }
                 }}
                 aria-label="Search an address or place"
                 aria-expanded={addressResults.length > 0}
@@ -897,11 +919,11 @@ export default function WorldMap({
               )}
             </div>
 
-            {(addressResults.length > 0 || addressSearchError) && (
+            {(addressResults.length > 0 || displayedAddressSearchError) && (
               <div className="mt-1 overflow-hidden rounded border border-[#B58B3B]/60 bg-[#141414] shadow-xl">
-                {addressSearchError ? (
+                {displayedAddressSearchError ? (
                   <p role="status" className="px-3 py-2 text-xs text-[#A7A39A]">
-                    {addressSearchError}
+                    {displayedAddressSearchError}
                   </p>
                 ) : (
                   <ul id="map-address-suggestions" className="max-h-60 overflow-y-auto">
@@ -1015,10 +1037,10 @@ export default function WorldMap({
                       className="w-full px-2.5 py-2 bg-[#0a0a0a] border border-[#333333] focus:border-[#E5C77B] rounded text-xs text-[#F5F0E5] outline-none"
                     >
                       <option value="Commercial">Commercial</option>
-                      <option value="Residential High-Rise">Residential High-Rise</option>
-                      <option value="Bridge / Infrastructure">Bridge / Infrastructure</option>
+                      <option value="Residential">Residential</option>
                       <option value="Industrial">Industrial</option>
-                      <option value="Civic / Hospital">Civic / Hospital</option>
+                      <option value="Institutional">Institutional</option>
+                      <option value="Other">Other</option>
                     </select>
                   </div>
 
@@ -1050,13 +1072,19 @@ export default function WorldMap({
                 </div>
               </div>
 
+              {pinSaveError && (
+                <p role="alert" className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  {pinSaveError}
+                </p>
+              )}
+
               <div className="flex items-center gap-2 pt-3 mt-3 border-t border-[#222222]">
                 <button
                   type="submit"
                   disabled={isSavingPin || !newBuildingName.trim()}
                   className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] disabled:opacity-50 text-[#090909] font-bold text-xs rounded transition-colors cursor-pointer"
                 >
-                  {isSavingPin ? 'Saving to Neon...' : 'Save & Lock Pin'}
+                  {isSavingPin ? 'Saving building...' : 'Save & Lock Pin'}
                 </button>
                 <button
                   type="button"
