@@ -72,7 +72,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   ].join('\n');
 
   try {
-    const models = [process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'].filter(
+    const models = [process.env.GEMINI_MODEL, 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'].filter(
       (m, i, all): m is string => Boolean(m) && all.indexOf(m) === i
     );
     let response: Response | null = null;

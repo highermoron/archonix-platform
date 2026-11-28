@@ -1140,7 +1140,8 @@ export default function App() {
       });
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error('Gemini Vision endpoint requires Vercel deployment (or vercel dev).');
+        const preview = await response.text().catch(() => '');
+        throw new Error(`Vision API returned HTTP ${response.status} (${preview.slice(0, 80).replace(/\s+/g, ' ').trim() || 'non-JSON response'})`);
       }
       const data = (await response.json()) as {
         error?: string;
