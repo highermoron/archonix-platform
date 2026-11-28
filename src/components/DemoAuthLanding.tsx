@@ -128,7 +128,7 @@ export const DemoAuthLanding: React.FC<DemoAuthLandingProps> = ({ onEnterWorkspa
       <div className="relative flex items-center justify-center p-6 sm:p-12 bg-[#090909] overflow-hidden">
         <div className="pointer-events-none absolute h-96 w-96 rounded-full bg-[#B58B3B]/10 blur-[130px]" />
 
-        <div className="relative w-full max-w-md rounded-2xl bg-[#121212]/90 border border-white/[0.08] p-7 sm:p-8 shadow-2xl shadow-black/60 backdrop-blur-xl animate-screen-in">
+        <div className="relative w-full max-w-md rounded-2xl liquid-glass-card p-7 sm:p-8 animate-screen-in">
           <div className="flex items-center justify-between gap-2 mb-5">
             <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#B58B3B]/15 border border-[#B58B3B]/35 text-[10px] font-mono font-semibold tracking-wider text-[#E5C77B] uppercase">
               <span className="h-1.5 w-1.5 rounded-full bg-[#E5C77B]" />

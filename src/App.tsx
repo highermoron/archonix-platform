@@ -2242,7 +2242,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-transparent text-[#F5F0E5] flex font-sans selection:bg-[#B58B3B]/40 selection:text-[#F5F0E5]">
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#111111]/95 backdrop-blur-xl border-r border-white/[0.06] transform transition-transform duration-300 ease-in-out lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-64 liquid-glass border-r border-white/[0.08] transform transition-transform duration-300 ease-in-out lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="h-16 px-5 border-b border-white/[0.06] flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#E5C77B]/20 to-[#B58B3B]/5 border border-[#B58B3B]/40 flex items-center justify-center text-[#E5C77B] shadow-inner shadow-[#E5C77B]/10">
@@ -2355,7 +2355,7 @@ export default function App() {
       </aside>
 
       <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:pl-64' : 'pl-0'}`}>
-        <header className="h-16 bg-[#111111]/85 backdrop-blur-md border-b border-white/[0.06] px-6 flex items-center justify-between sticky top-0 z-40">
+        <header className="h-16 liquid-glass border-b border-white/[0.08] px-6 flex items-center justify-between sticky top-0 z-40">
           <div className="flex items-center gap-4">
             <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] text-[#A7A39A] hover:text-[#F5F0E5] transition-colors cursor-pointer">
               <Menu className="w-4 h-4" />
@@ -2479,22 +2479,22 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all">
+                <div className="p-5 liquid-glass-card rounded-xl transition-all">
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Total Buildings</div>
                   <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{activeBuildings.length}</div>
                   <div className="text-[11px] text-[#A7A39A] mt-2">{buildingsWithRecords} with inspection records</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl transition-all">
+                <div className="p-5 liquid-glass-card rounded-xl transition-all">
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Health Index</div>
                   <div className="text-3xl font-bold text-[#E5C77B] font-mono tracking-tight">{portfolioHealthAverage}</div>
                   <div className="text-[11px] text-[#A7A39A] mt-2">Portfolio Average</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-red-500/35 rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('alerts')}>
+                <div className="p-5 liquid-glass-card rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('alerts')}>
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Active Alerts</div>
                   <div className="text-3xl font-bold text-red-400 font-mono tracking-tight">{alerts.filter(a => !a.read).length}</div>
                   <div className="text-[11px] text-red-400/90 mt-2">Requires Review</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl transition-all cursor-pointer" onClick={() => { setMonitorActiveTab('telemetry'); setCurrentScreen('monitor'); }}>
+                <div className="p-5 liquid-glass-card rounded-xl transition-all cursor-pointer" onClick={() => { setMonitorActiveTab('telemetry'); setCurrentScreen('monitor'); }}>
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2 flex items-center justify-between">
                     <span>IoT Telemetry</span>
                     <Radio className={`w-3.5 h-3.5 ${isTelemetryStreaming ? 'text-emerald-400 animate-pulse' : 'text-[#777777]'}`} />
@@ -2504,22 +2504,22 @@ export default function App() {
                   </div>
                   <div className="text-[11px] text-[#A7A39A] mt-2">{activeBuildings.length * 4} sensors online</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all">
+                <div className="p-5 liquid-glass-card rounded-xl transition-all">
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Scans Completed</div>
                   <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{scans.length}</div>
                   <div className="text-[11px] text-emerald-400 mt-2">Recorded inspections</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-amber-500/35 rounded-xl transition-all">
+                <div className="p-5 liquid-glass-card rounded-xl transition-all">
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Attention Required</div>
                   <div className="text-3xl font-bold text-amber-400 font-mono tracking-tight">{activeBuildings.filter(building => building.status === 'Inspection Recommended' || building.status === 'Urgent Assessment').length}</div>
                   <div className="text-[11px] text-amber-400/90 mt-2">Buildings need review</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('work-orders')}>
+                <div className="p-5 liquid-glass-card rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('work-orders')}>
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Awaiting Inspection</div>
                   <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{openWorkOrders}</div>
                   <div className={`text-[11px] mt-2 ${dueWorkOrders.length ? 'text-amber-300' : 'text-[#A7A39A]'}`}>{dueWorkOrders.length} due today or overdue</div>
                 </div>
-                <div className="p-5 bg-[#141414] border border-white/[0.07] hover:border-white/[0.14] rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('review-queue')}>
+                <div className="p-5 liquid-glass-card rounded-xl transition-all cursor-pointer" onClick={() => setCurrentScreen('review-queue')}>
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Review Queue</div>
                   <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{reviewQueue.length}</div>
                   <div className="text-[11px] text-[#A7A39A] mt-2">Submitted inspections</div>
@@ -2527,7 +2527,7 @@ export default function App() {
               </div>
 
               {/* Quick Demo / Pitch Shortcuts Bar */}
-              <div className="p-4 bg-[#141414] border border-white/[0.07] rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="p-4 liquid-glass-card rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
                   <div className="p-1.5 rounded-lg bg-[#B58B3B]/15 border border-[#B58B3B]/35 text-[#E5C77B]">
                     <Sparkles className="w-4 h-4" />
@@ -2574,7 +2574,7 @@ export default function App() {
               </div>
 
               {/* Continuous Structural Health Telemetry Stream Preview */}
-              <section className="p-5 bg-[#141414] border border-white/[0.07] rounded-xl space-y-4">
+              <section className="p-5 liquid-glass-card rounded-xl space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className={`p-2 rounded border ${criticalTelemetryCount > 0 ? 'bg-red-500/15 border-red-500/40 text-red-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
@@ -2782,7 +2782,7 @@ export default function App() {
                         ? 'bg-red-500/20 text-red-300 border-red-500/40'
                         : 'bg-amber-500/15 text-amber-300 border-amber-500/35';
                   return (
-                    <div key={bld.id} className="group bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl overflow-hidden flex flex-col justify-between transition-all shadow-lg shadow-black/20">
+                    <div key={bld.id} className="group liquid-glass-card rounded-xl overflow-hidden flex flex-col justify-between transition-all">
                       <div>
                         <div className="h-44 overflow-hidden relative">
                           <img src={bld.imageUrl} alt={bld.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
@@ -3515,7 +3515,7 @@ export default function App() {
                   <button onClick={() => window.print()} disabled={!reportBuilding} className="px-4 py-2.5 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] text-[#090909] font-semibold text-xs rounded-lg flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-[#B58B3B]/15 cursor-pointer transition-all"><Download className="w-4 h-4" /> Print / Save PDF</button>
                 </div>
               </div>
-              <div id="printable-report" className="p-8 sm:p-10 bg-[#141414] border border-white/[0.08] rounded-2xl space-y-8 max-w-4xl mx-auto shadow-2xl shadow-black/40">
+              <div id="printable-report" className="p-8 sm:p-10 liquid-glass-card rounded-2xl space-y-8 max-w-4xl mx-auto">
                 {reportBuilding ? <>
                   <header className="space-y-4 border-b border-white/[0.08] pb-6">
                     <div className="flex items-center justify-between gap-4">
