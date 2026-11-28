@@ -114,27 +114,33 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     for (const model of models) {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const candidateRes = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `${systemPrompt}\n\nUSER QUERY:\n${query}\n\nPORTFOLIO DATA:\n${JSON.stringify(portfolioContext)}`,
-                },
-              ],
+      const makeRequest = (disableThinking: boolean) =>
+        fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: `${systemPrompt}\n\nUSER QUERY:\n${query}\n\nPORTFOLIO DATA:\n${JSON.stringify(portfolioContext)}`,
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              responseMimeType: 'application/json',
+              ...(disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
             },
-          ],
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: 'application/json',
-            ...(model === 'gemini-2.5-flash' ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
-          },
-        }),
-      });
+          }),
+        });
+
+      let candidateRes = await makeRequest(true);
+      if (candidateRes.status === 400) {
+        candidateRes = await makeRequest(false);
+      }
 
       if (candidateRes.ok) {
         response = candidateRes;
