@@ -663,6 +663,21 @@ export default function App() {
             ? 'Monitoring Required'
             : 'Low Concern';
 
+      const demoProfiles: Record<string, { healthIndex: number; status: Building['status']; floors: number; incidentNote: string }> = {
+        tokyo: { healthIndex: 64.2, status: 'Urgent Assessment', floors: 42, incidentNote: 'Diagonal shear crack (148 mm × 0.85 mm) detected on Level 18 core column following minor tremor.' },
+        london: { healthIndex: 76.8, status: 'Inspection Recommended', floors: 28, incidentNote: 'Basement slab moisture seepage and localized efflorescence near Thames-side retaining wall.' },
+        'new delhi': { healthIndex: 81.5, status: 'Monitoring Required', floors: 19, incidentNote: 'Thermal expansion joint settlement and hairline facade micro-fissuring on west elevation.' },
+        paris: { healthIndex: 88.4, status: 'Low Concern', floors: 12, incidentNote: 'Baseline limestone facade telemetry nominal; routine quarterly scan passed.' },
+        washington: { healthIndex: 79.1, status: 'Inspection Recommended', floors: 16, incidentNote: 'Elevated rebar corrosion potential flagged in podium transfer beam.' },
+        berlin: { healthIndex: 91.6, status: 'Low Concern', floors: 22, incidentNote: 'Composite steel frame vibration and tilt sensors operating within baseline tolerances.' },
+        ottawa: { healthIndex: 84.3, status: 'Monitoring Required', floors: 14, incidentNote: 'Freeze-thaw spalling monitored along north parapet expansion joint.' },
+        canberra: { healthIndex: 93.8, status: 'Low Concern', floors: 8, incidentNote: 'Post-tensioned slab deflection nominal across all monitored zones.' },
+        sydney: { healthIndex: 95.1, status: 'Low Concern', floors: 39, incidentNote: 'Harbourfront curtain wall wind-load telemetry nominal; zero active defects.' },
+      };
+      const nameLower = profile.name.toLowerCase();
+      const matchedDemoKey = isDemoSession ? Object.keys(demoProfiles).find((k) => nameLower.includes(k)) : undefined;
+      const demoSeed = matchedDemoKey ? demoProfiles[matchedDemoKey] : undefined;
+
       return {
         id: profile.id,
         name: profile.name,
@@ -671,13 +686,13 @@ export default function App() {
         lng: profile.longitude,
         type,
         year: profile.construction_year || 2022,
-        floors: profile.floors_above_ground || 1,
+        floors: profile.floors_above_ground && profile.floors_above_ground > 1 ? profile.floors_above_ground : (demoSeed?.floors || profile.floors_above_ground || 1),
         description: profile.description || 'Structural asset loaded from the connected database.',
-        status: local?.status || status,
-        healthIndex: local?.healthIndex,
-        lastScanDate: local?.lastScanDate || 'Not scanned',
+        status: local?.status || (status === 'Low Concern' && demoSeed ? demoSeed.status : status),
+        healthIndex: local?.healthIndex ?? demoSeed?.healthIndex,
+        lastScanDate: local?.lastScanDate || (demoSeed ? '24 Nov 2026' : 'Not scanned'),
         imageUrl: local?.imageUrl || INITIAL_BUILDINGS[0].imageUrl,
-        incidentNote: local?.incidentNote
+        incidentNote: local?.incidentNote || demoSeed?.incidentNote
       };
     });
 
@@ -702,6 +717,32 @@ export default function App() {
   const [scanCrackWidth, setScanCrackWidth] = useState('');
   const [scanNotes, setScanNotes] = useState('');
   const [scanError, setScanError] = useState<string | null>(null);
+  const [photoAnalyzing, setPhotoAnalyzing] = useState(false);
+  const [toasts, setToasts] = useState<Array<{ id: string; title: string; message?: string; tone: 'gold' | 'emerald' | 'red' }>>([]);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
+
+  const pushToast = (title: string, message?: string, tone: 'gold' | 'emerald' | 'red' = 'gold') => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, title, message, tone }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        if (!isAuthenticated) return;
+        event.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+      } else if (event.key === 'Escape') {
+        setCommandPaletteOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isAuthenticated]);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [buildingSearch, setBuildingSearch] = useState('');
   const [buildingTypeFilter, setBuildingTypeFilter] = useState('All types');
@@ -1054,6 +1095,11 @@ export default function App() {
       };
 
       setAlerts(current => [newAlert, ...current]);
+      pushToast(
+        `Telemetry Breach: ${result.generatedAlert.buildingName}`,
+        result.generatedAlert.title,
+        'red'
+      );
       recordAudit(
         `IoT Telemetry Breach: ${result.generatedAlert.title}`,
         'Telemetry',
@@ -1061,7 +1107,57 @@ export default function App() {
         result.generatedAlert.description
       );
     } else if (preset === 'baseline') {
+      pushToast('Sensors Reset', 'All IoT telemetry sensors returned to nominal baseline.', 'emerald');
       recordAudit('Reset IoT telemetry sensors', 'Telemetry', 'all', 'All structural health telemetry sensors reset to safe nominal baseline.');
+    }
+  };
+
+  const handleAnalyzePhotoWithAI = async () => {
+    if (!uploadedImageUrl) {
+      setScanError('Upload a photograph first to run Gemini Vision analysis.');
+      return;
+    }
+    setScanError(null);
+    setPhotoAnalyzing(true);
+    try {
+      const targetBld = activeBuildings.find((b) => b.id === activeSelectedBuildingId);
+      const response = await fetch('/api/analyze-photo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageDataUrl: uploadedImageUrl,
+          component: activeScanComponent,
+          buildingName: targetBld?.name || 'Building Asset',
+        }),
+      });
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('Gemini Vision endpoint requires Vercel deployment (or vercel dev).');
+      }
+      const data = (await response.json()) as {
+        error?: string;
+        crackLengthMm?: string;
+        crackWidthMm?: string;
+        concernLevel?: ScanRecord['concernLevel'];
+        observations?: string[];
+        summary?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.error || `Vision analysis failed (${response.status})`);
+      }
+      if (data.concernLevel) setScanConcern(data.concernLevel);
+      if (data.crackLengthMm !== undefined) setScanCrackLength(data.crackLengthMm);
+      if (data.crackWidthMm !== undefined) setScanCrackWidth(data.crackWidthMm);
+      const lines = [...(data.observations || [])];
+      if (data.summary) lines.push(`AI Summary: ${data.summary}`);
+      if (lines.length > 0) setScanNotes(lines.join('\n'));
+      pushToast('Gemini Vision Complete', `Assessed as ${data.concernLevel || 'Moderate Concern'} and auto-filled observations.`, 'emerald');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Photo analysis failed.';
+      setScanError(message);
+      pushToast('Vision Analysis Failed', message, 'red');
+    } finally {
+      setPhotoAnalyzing(false);
     }
   };
 
@@ -2989,11 +3085,22 @@ export default function App() {
                         className="w-full h-full object-cover"
                       />
                     </div>
-                    <label className="px-4 py-2 bg-[#222222] hover:bg-[#333333] text-[#F5F0E5] text-xs font-medium rounded cursor-pointer inline-flex items-center gap-2">
-                      <Upload className="w-4 h-4 text-[#E5C77B]" />
-                      <span>Upload New Photograph</span>
-                      <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleImageUpload} />
-                    </label>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="px-4 py-2 bg-[#222222] hover:bg-[#333333] text-[#F5F0E5] text-xs font-medium rounded-lg cursor-pointer inline-flex items-center gap-2 transition-colors">
+                        <Upload className="w-4 h-4 text-[#E5C77B]" />
+                        <span>Upload New Photograph</span>
+                        <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleImageUpload} />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!uploadedImageUrl || photoAnalyzing}
+                        onClick={() => void handleAnalyzePhotoWithAI()}
+                        className="px-4 py-2 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] disabled:opacity-40 text-[#090909] text-xs font-semibold rounded-lg inline-flex items-center gap-2 shadow-lg shadow-[#B58B3B]/20 transition-all cursor-pointer"
+                      >
+                        <Sparkles className={`w-4 h-4 ${photoAnalyzing ? 'animate-spin' : ''}`} />
+                        <span>{photoAnalyzing ? 'Analyzing with Gemini Vision…' : 'Analyze Photo with Gemini AI'}</span>
+                      </button>
+                    </div>
                     {uploadedImageUrl && (
                       <div className="mt-4 p-3 bg-[#191919] border border-[#B58B3B]/40 rounded space-y-2">
                         <div className="flex items-center justify-between text-xs">
@@ -3690,6 +3797,150 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Global Ctrl+K Command Palette */}
+      {commandPaletteOpen && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-start justify-center pt-20 px-4"
+          onClick={() => setCommandPaletteOpen(false)}
+        >
+          <div
+            className="w-full max-w-xl liquid-glass-card rounded-2xl overflow-hidden animate-screen-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/[0.08]">
+              <Search className="w-4 h-4 text-[#E5C77B]" />
+              <input
+                autoFocus
+                value={commandQuery}
+                onChange={(e) => setCommandQuery(e.target.value)}
+                placeholder="Jump to a building, screen, or trigger a live simulation…"
+                className="flex-1 bg-transparent text-sm text-[#F5F0E5] placeholder:text-[#7C7870] focus:outline-none"
+              />
+              <kbd className="px-1.5 py-0.5 rounded bg-white/[0.06] border border-white/[0.1] text-[10px] font-mono text-[#A7A39A]">ESC</kbd>
+            </div>
+            <div className="max-h-96 overflow-y-auto p-2 space-y-3">
+              <div>
+                <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-widest text-[#7C7870]">Live Crisis Simulations</div>
+                {[
+                  { label: 'Simulate Seismic Tremor Alert', preset: 'seismic' as SimulationPreset, tone: 'text-red-300' },
+                  { label: 'Simulate High-Wind Load Event', preset: 'wind' as SimulationPreset, tone: 'text-amber-300' },
+                  { label: 'Simulate Basement Moisture Ingress', preset: 'moisture' as SimulationPreset, tone: 'text-sky-300' },
+                  { label: 'Reset All Sensors to Nominal Baseline', preset: 'baseline' as SimulationPreset, tone: 'text-emerald-300' },
+                ]
+                  .filter((item) => item.label.toLowerCase().includes(commandQuery.toLowerCase()))
+                  .map((item) => (
+                    <button
+                      key={item.preset}
+                      type="button"
+                      onClick={() => {
+                        const target = activeBuildings[0];
+                        handleSimulateTelemetry(item.preset, target?.id);
+                        setMonitorActiveTab('telemetry');
+                        setCurrentScreen('monitor');
+                        setCommandPaletteOpen(false);
+                        setCommandQuery('');
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-white/[0.06] text-xs transition-colors cursor-pointer"
+                    >
+                      <span className={`font-medium flex items-center gap-2 ${item.tone}`}>
+                        <Zap className="w-3.5 h-3.5" />
+                        {item.label}
+                      </span>
+                      <span className="text-[10px] font-mono text-[#7C7870]">SIMULATE</span>
+                    </button>
+                  ))}
+              </div>
+              <div>
+                <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-widest text-[#7C7870]">Screens</div>
+                {navItems
+                  .filter((item) => item.label.toLowerCase().includes(commandQuery.toLowerCase()))
+                  .slice(0, 6)
+                  .map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setCurrentScreen(item.id as Screen);
+                          setCommandPaletteOpen(false);
+                          setCommandQuery('');
+                        }}
+                        className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-white/[0.06] text-xs text-[#F5F0E5] transition-colors cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <Icon className="w-3.5 h-3.5 text-[#E5C77B]" />
+                          {item.label}
+                        </span>
+                        <span className="text-[10px] font-mono text-[#7C7870]">{item.section}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+              <div>
+                <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-widest text-[#7C7870]">Buildings</div>
+                {activeBuildings
+                  .filter((b) => `${b.name} ${b.location}`.toLowerCase().includes(commandQuery.toLowerCase()))
+                  .slice(0, 6)
+                  .map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedBuildingId(b.id);
+                        setCurrentScreen('map');
+                        setCommandPaletteOpen(false);
+                        setCommandQuery('');
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-white/[0.06] text-xs text-[#F5F0E5] transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2.5 truncate">
+                        <MapPin className="w-3.5 h-3.5 text-[#B58B3B] shrink-0" />
+                        <span className="truncate">{b.name}</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-[#E5C77B] shrink-0">
+                        {typeof b.healthIndex === 'number' ? `${b.healthIndex.toFixed(1)}%` : b.status}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live Liquid-Glass Toast Notifications */}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-5 right-5 z-[110] flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
+          {toasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`pointer-events-auto liquid-glass-card rounded-xl p-3.5 border-l-2 animate-screen-in ${
+                toast.tone === 'red'
+                  ? 'border-l-red-400'
+                  : toast.tone === 'emerald'
+                    ? 'border-l-emerald-400'
+                    : 'border-l-[#E5C77B]'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-[#F5F0E5]">{toast.title}</div>
+                  {toast.message && <div className="text-[11px] text-[#A7A39A] mt-0.5">{toast.message}</div>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+                  className="text-[#7C7870] hover:text-[#F5F0E5] cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
