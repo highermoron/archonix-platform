@@ -2407,14 +2407,14 @@ export default function App() {
         </header>
 
         <main className="flex-1 p-6 lg:p-8 bg-transparent overflow-y-auto">
-          {buildingsLoading && (
+          {!isDemoSession && buildingsLoading && (
             <div role="status" className="mb-4 p-3 rounded-xl border border-white/[0.06] bg-[#141414] text-xs text-[#A7A39A]">
               Loading buildings from the database…
             </div>
           )}
-          {buildingsError && (
+          {!isDemoSession && buildingsError && (
             <div role="alert" className="mb-4 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs text-amber-200">
-              Building data could not be loaded from Neon: {buildingsError} {isDemoSession ? 'Using local demo buildings instead.' : 'Showing local buildings, if available.'}
+              Building data could not be loaded from Neon: {buildingsError} Showing local buildings, if available.
             </div>
           )}
           {storageError && <div role="alert" className="mb-4 p-3 rounded-xl border border-red-500/30 bg-red-500/10 text-xs text-red-200">Some browser data could not be read or saved: {storageError}. Export or copy important records before leaving.</div>}
@@ -2523,6 +2523,53 @@ export default function App() {
                   <div className="text-[11px] text-[#A7A39A] font-mono uppercase tracking-wider mb-2">Review Queue</div>
                   <div className="text-3xl font-bold text-[#F5F0E5] font-mono tracking-tight">{reviewQueue.length}</div>
                   <div className="text-[11px] text-[#A7A39A] mt-2">Submitted inspections</div>
+                </div>
+              </div>
+
+              {/* Quick Demo / Pitch Shortcuts Bar */}
+              <div className="p-4 bg-[#141414] border border-white/[0.07] rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-[#B58B3B]/15 border border-[#B58B3B]/35 text-[#E5C77B]">
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[#F5F0E5]">Quick Showcase Actions</div>
+                    <div className="text-[11px] text-[#A7A39A]">Jump straight into live GIS, AI search, telemetry simulation, or executive reports.</div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentScreen('map')}
+                    className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.08] text-xs font-mono text-[#E5C77B] flex items-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span>Live GIS Map</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = activeBuildings[0];
+                      if (target) {
+                        setSelectedBuildingId(target.id);
+                        handleSimulateTelemetry('seismic', target.id);
+                      }
+                      setMonitorActiveTab('telemetry');
+                      setCurrentScreen('monitor');
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-xs font-mono text-amber-200 flex items-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Simulate Seismic Alert</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentScreen('reports')}
+                    className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.08] text-xs font-mono text-[#F5F0E5] flex items-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#E5C77B]" />
+                    <span>Executive Report</span>
+                  </button>
                 </div>
               </div>
 
@@ -2693,58 +2740,85 @@ export default function App() {
           )}
 
           {currentScreen === 'buildings' && (
-            <div className="space-y-6">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-6 animate-screen-in">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-white/[0.06]">
                 <div>
+                  <p className="text-[11px] font-mono uppercase tracking-[0.18em] text-[#B58B3B] mb-1">Asset Registry</p>
                   <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Building Portfolio Management</h1>
-                  <p className="text-sm text-[#A7A39A]">Registered architectural assets and automated telemetry profiles.</p>
+                  <p className="text-sm text-[#A7A39A] mt-1">Registered architectural assets and automated telemetry profiles.</p>
                 </div>
-                {canManageBuildings && <div className="flex flex-wrap gap-2">
-                  <button onClick={() => setCurrentScreen('import-buildings')} className="px-4 py-2.5 bg-[#191919] border border-[#B58B3B]/40 text-[#E5C77B] font-semibold text-xs rounded transition-colors flex items-center gap-2">
+                {canManageBuildings && <div className="flex flex-wrap gap-2.5">
+                  <button onClick={() => setCurrentScreen('import-buildings')} className="px-4 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-[#B58B3B]/40 text-[#E5C77B] font-semibold text-xs rounded-lg transition-all flex items-center gap-2 cursor-pointer">
                     <FileUp className="w-4 h-4" /><span>Import CSV</span>
                   </button>
-                  <button onClick={() => setCurrentScreen('add-building')} className="px-4 py-2.5 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-semibold text-xs rounded transition-colors flex items-center gap-2">
+                  <button onClick={() => setCurrentScreen('add-building')} className="px-4 py-2.5 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] text-[#090909] font-semibold text-xs rounded-lg transition-all flex items-center gap-2 shadow-lg shadow-[#B58B3B]/15 cursor-pointer">
                     <Plus className="w-4 h-4" />
                     <span>Register New Building</span>
                   </button>
                 </div>}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 bg-[#191919] border border-[#222222] rounded">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 bg-[#141414] border border-white/[0.07] rounded-xl">
                 <label className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#A7A39A]" />
-                  <input value={buildingSearch} onChange={event => setBuildingSearch(event.target.value)} placeholder="Search building or location" className="w-full pl-9 pr-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#7C7870]" />
+                  <input value={buildingSearch} onChange={event => setBuildingSearch(event.target.value)} placeholder="Search building or location" className="w-full pl-9 pr-3 py-2 bg-[#0B0B0B] border border-white/[0.08] focus:border-[#B58B3B]/70 focus:outline-none rounded-lg text-xs text-[#F5F0E5] transition-colors" />
                 </label>
-                <select aria-label="Filter by building type" value={buildingTypeFilter} onChange={event => setBuildingTypeFilter(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                <select aria-label="Filter by building type" value={buildingTypeFilter} onChange={event => setBuildingTypeFilter(event.target.value)} className="px-3 py-2 bg-[#0B0B0B] border border-white/[0.08] rounded-lg text-xs text-[#F5F0E5]">
                   {['All types', 'Residential', 'Commercial', 'Industrial', 'Institutional', 'Other'].map(type => <option key={type}>{type}</option>)}
                 </select>
-                <select aria-label="Filter by status" value={buildingStatusFilter} onChange={event => setBuildingStatusFilter(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                <select aria-label="Filter by status" value={buildingStatusFilter} onChange={event => setBuildingStatusFilter(event.target.value)} className="px-3 py-2 bg-[#0B0B0B] border border-white/[0.08] rounded-lg text-xs text-[#F5F0E5]">
                   {['All statuses', 'Low Concern', 'Inspection Recommended', 'Monitoring Required', 'Urgent Assessment'].map(status => <option key={status}>{status}</option>)}
                 </select>
-                <select aria-label="Sort buildings" value={buildingSort} onChange={event => setBuildingSort(event.target.value)} className="px-3 py-2 bg-[#090909] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                <select aria-label="Sort buildings" value={buildingSort} onChange={event => setBuildingSort(event.target.value)} className="px-3 py-2 bg-[#0B0B0B] border border-white/[0.08] rounded-lg text-xs text-[#F5F0E5]">
                   {['Name (A–Z)', 'Health (high–low)', 'Status'].map(sort => <option key={sort}>{sort}</option>)}
                 </select>
               </div>
-              <p className="text-xs text-[#A7A39A]">{filteredBuildings.length} of {activeBuildings.length} buildings</p>
+              <p className="text-xs font-mono text-[#A7A39A]">{filteredBuildings.length} of {activeBuildings.length} buildings</p>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {filteredBuildings.map((bld) => (
-                  <div key={bld.id} className="p-5 bg-[#191919] border border-[#222222] rounded flex flex-col justify-between">
-                    <div>
-                      <div className="h-44 rounded overflow-hidden mb-4 relative">
-                        <img src={bld.imageUrl} alt={bld.name} className="w-full h-full object-cover" />
-                        <div className="absolute top-3 right-3 px-2 py-0.5 rounded text-[10px] font-mono bg-[#090909]/80 text-[#E5C77B]">{bld.type}</div>
+                {filteredBuildings.map((bld) => {
+                  const statusTone =
+                    bld.status === 'Low Concern'
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                      : bld.status === 'Urgent Assessment'
+                        ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                        : 'bg-amber-500/15 text-amber-300 border-amber-500/35';
+                  return (
+                    <div key={bld.id} className="group bg-[#141414] border border-white/[0.07] hover:border-[#B58B3B]/40 rounded-xl overflow-hidden flex flex-col justify-between transition-all shadow-lg shadow-black/20">
+                      <div>
+                        <div className="h-44 overflow-hidden relative">
+                          <img src={bld.imageUrl} alt={bld.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[#141414] via-black/20 to-transparent" />
+                          <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md text-[10px] font-mono font-semibold border backdrop-blur-md bg-[#090909]/75 border-white/[0.1] text-[#E5C77B]">
+                            {bld.type}
+                          </div>
+                          {typeof bld.healthIndex === 'number' && (
+                            <div className="absolute top-3 right-3 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold backdrop-blur-md bg-[#090909]/80 border border-white/[0.1] text-[#F5F0E5]">
+                              {bld.healthIndex.toFixed(1)}%
+                            </div>
+                          )}
+                          <div className="absolute bottom-3 left-3">
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border backdrop-blur-md ${statusTone}`}>
+                              {bld.status}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="p-5">
+                          <h3 className="font-bold text-[#F5F0E5] text-base mb-1 group-hover:text-[#F5E6BE] transition-colors">{bld.name}</h3>
+                          <p className="text-xs text-[#A7A39A] mb-3 flex items-center gap-1.5">
+                            <Compass className="w-3.5 h-3.5 text-[#B58B3B] shrink-0" />
+                            <span className="truncate">{bld.location}</span>
+                          </p>
+                          <p className="text-xs text-[#A7A39A] leading-relaxed line-clamp-2">{bld.description}</p>
+                        </div>
                       </div>
-                      <h3 className="font-bold text-[#F5F0E5] text-base mb-1">{bld.name}</h3>
-                      <p className="text-xs text-[#A7A39A] mb-3">{bld.location}</p>
-                      <p className="text-xs text-[#A7A39A] mb-4 line-clamp-2">{bld.description}</p>
+                      <div className="px-5 pb-5 pt-3 border-t border-white/[0.06] flex items-center gap-2">
+                        {canEdit && <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] text-[#090909] font-semibold text-xs rounded-lg transition-all cursor-pointer">Record Inspection</button>}
+                        <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('map'); }} className="px-3 py-2 bg-white/[0.05] hover:bg-white/[0.09] border border-white/[0.08] text-xs text-[#E5C77B] rounded-lg font-mono transition-all cursor-pointer">Map Pin</button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 pt-3 border-t border-[#222222]">
-                      {canEdit && <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('scan'); }} className="flex-1 py-2 bg-[#E5C77B] hover:bg-[#B58B3B] text-[#090909] font-medium text-xs rounded transition-colors">Record Inspection</button>}
-                      <button onClick={() => { setSelectedBuildingId(bld.id); setCurrentScreen('map'); }} className="px-3 py-2 bg-[#222222] hover:bg-[#333333] text-xs text-[#E5C77B] rounded font-mono">Map Pin</button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
-              {filteredBuildings.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#191919] border border-[#222222] rounded">No buildings match those filters.</p>}
+              {filteredBuildings.length === 0 && <p className="p-8 text-center text-sm text-[#A7A39A] bg-[#141414] border border-white/[0.07] rounded-xl">No buildings match those filters.</p>}
             </div>
           )}
 
@@ -3427,50 +3501,81 @@ export default function App() {
           )}
 
           {currentScreen === 'reports' && (
-            <div className="space-y-6">
-              <style>{`@media print { body * { visibility: hidden !important; } #printable-report, #printable-report * { visibility: visible !important; } #printable-report { position: absolute; inset: 0; width: 100%; color: #111 !important; background: #fff !important; } #printable-report img { max-height: 260px; object-fit: contain; } }`}</style>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <h1 className="text-2xl font-bold text-[#F5F0E5]">Reports & Inspection History</h1>
+            <div className="space-y-6 animate-screen-in">
+              <style>{`@media print { @page { margin: 16mm; } body * { visibility: hidden !important; } #printable-report, #printable-report * { visibility: visible !important; } #printable-report { position: absolute; inset: 0; width: 100%; max-width: none !important; padding: 0 !important; border: none !important; color: #111 !important; background: #fff !important; box-shadow: none !important; } #printable-report article { break-inside: avoid; border-color: #d4d4d8 !important; background: #fafafa !important; } #printable-report img { max-height: 240px; object-fit: contain; } }`}</style>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-white/[0.06]">
+                <div>
+                  <p className="text-[11px] font-mono uppercase tracking-[0.18em] text-[#B58B3B] mb-1">Executive Dossier</p>
+                  <h1 className="text-2xl lg:text-3xl font-bold tracking-tight text-[#F5F0E5]">Reports & Inspection History</h1>
+                </div>
                 <div className="flex gap-3">
-                  <select aria-label="Select report building" value={reportBuilding?.id || ''} onChange={event => setReportBuildingId(event.target.value)} className="px-3 py-2 bg-[#191919] border border-[#222222] rounded text-xs text-[#F5F0E5]">
+                  <select aria-label="Select report building" value={reportBuilding?.id || ''} onChange={event => setReportBuildingId(event.target.value)} className="px-3.5 py-2 bg-[#141414] border border-white/[0.08] rounded-lg text-xs text-[#F5F0E5]">
                     {activeBuildings.map(building => <option key={building.id} value={building.id}>{building.name}</option>)}
                   </select>
-                  <button onClick={() => window.print()} disabled={!reportBuilding} className="px-4 py-2.5 bg-[#E5C77B] text-[#090909] font-semibold text-xs rounded flex items-center gap-2 disabled:opacity-50"><Download className="w-4 h-4" /> Print / Save PDF</button>
+                  <button onClick={() => window.print()} disabled={!reportBuilding} className="px-4 py-2.5 bg-gradient-to-r from-[#E5C77B] to-[#C9A24B] hover:from-[#F0D58D] hover:to-[#D5AE56] text-[#090909] font-semibold text-xs rounded-lg flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-[#B58B3B]/15 cursor-pointer transition-all"><Download className="w-4 h-4" /> Print / Save PDF</button>
                 </div>
               </div>
-              <div id="printable-report" className="p-8 bg-[#191919] border border-[#222222] rounded space-y-6 max-w-4xl mx-auto">
+              <div id="printable-report" className="p-8 sm:p-10 bg-[#141414] border border-white/[0.08] rounded-2xl space-y-8 max-w-4xl mx-auto shadow-2xl shadow-black/40">
                 {reportBuilding ? <>
-                  <header className="space-y-2 border-b border-[#222222] pb-5">
-                    <p className="text-[10px] uppercase tracking-widest text-[#B58B3B]">ARCHONIX · Inspection record report</p>
-                    <h2 className="font-bold text-xl text-[#F5F0E5]">{reportBuilding.name}</h2>
-                    <p className="text-xs text-[#A7A39A]">{reportBuilding.location}</p>
-                    <div className="flex flex-wrap gap-4 text-xs text-[#A7A39A]">
-                      <span>Building status: {reportBuilding.status}</span><span>Type: {reportBuilding.type}</span>
-                      <span>Generated: {reportGeneratedDate}</span>
+                  <header className="space-y-4 border-b border-white/[0.08] pb-6">
+                    <div className="flex items-center justify-between gap-4">
+                      <p className="text-[10px] font-mono uppercase tracking-[0.22em] text-[#B58B3B]">ARCHONIX · Structural Inspection Dossier</p>
+                      <span className="text-[10px] font-mono text-[#A7A39A]">Generated {reportGeneratedDate}</span>
+                    </div>
+                    <div>
+                      <h2 className="font-bold text-2xl text-[#F5F0E5] tracking-tight">{reportBuilding.name}</h2>
+                      <p className="text-xs text-[#A7A39A] mt-1">{reportBuilding.location}</p>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+                      <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                        <div className="text-[10px] font-mono uppercase text-[#7C7870]">Status</div>
+                        <div className="text-xs font-semibold text-[#F5F0E5] mt-1">{reportBuilding.status}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                        <div className="text-[10px] font-mono uppercase text-[#7C7870]">Asset Type</div>
+                        <div className="text-xs font-semibold text-[#F5F0E5] mt-1">{reportBuilding.type}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                        <div className="text-[10px] font-mono uppercase text-[#7C7870]">Health Index</div>
+                        <div className="text-xs font-semibold font-mono text-[#E5C77B] mt-1">{typeof reportBuilding.healthIndex === 'number' ? `${reportBuilding.healthIndex.toFixed(1)}%` : 'N/A'}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                        <div className="text-[10px] font-mono uppercase text-[#7C7870]">Records</div>
+                        <div className="text-xs font-semibold font-mono text-[#F5F0E5] mt-1">{reportScans.length}</div>
+                      </div>
                     </div>
                   </header>
-                  <section className="space-y-3">
-                    <h3 className="font-semibold text-sm text-[#F5F0E5]">Inspection records ({reportScans.length})</h3>
+                  <section className="space-y-4">
+                    <h3 className="font-semibold text-sm uppercase tracking-wider font-mono text-[#E5C77B]">Inspection Records ({reportScans.length})</h3>
                     {reportScans.map(scan => (
-                      <article key={scan.id} className="p-4 border border-[#333] rounded space-y-3">
-                        <div className="flex justify-between gap-3 text-xs"><strong>{scan.component} · {scan.concernLevel} · {scan.reviewStatus || 'Demo record'}</strong><span>{formatRecordDate(scan.date)}</span></div>
-                        <p className="text-xs">Crack length: {scan.crackLength} · Width: {scan.crackWidth}</p>
-                        <p className="text-xs">{scan.observations.join(' ')}</p>
-                        {scan.checklist && scan.checklist.length > 0 && <p className="text-xs">Checklist: {scan.checklist.filter(item => item.complete).length}/{scan.checklist.length} items marked complete.</p>}
-                        <img src={scan.imageUrl} alt={`${scan.component} evidence`} className="w-full max-h-64 object-contain rounded" />
-                        <p className="text-[10px]">Source: {scan.source === 'manual' ? 'Inspector-entered' : 'Preloaded demo record'}. Not an engineering assessment.</p>
+                      <article key={scan.id} className="p-5 bg-white/[0.02] border border-white/[0.08] rounded-xl space-y-3">
+                        <div className="flex flex-wrap justify-between gap-2 text-xs">
+                          <strong className="text-[#F5F0E5]">{scan.component} · {scan.concernLevel} · {scan.reviewStatus || 'Demo record'}</strong>
+                          <span className="font-mono text-[#A7A39A]">{formatRecordDate(scan.date)}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-4 text-xs font-mono text-[#A7A39A]">
+                          <span>Crack length: <strong className="text-[#F5F0E5]">{scan.crackLength}</strong></span>
+                          <span>Width: <strong className="text-[#F5F0E5]">{scan.crackWidth}</strong></span>
+                        </div>
+                        <p className="text-xs leading-relaxed text-[#D8D3C8]">{scan.observations.join(' ')}</p>
+                        {scan.checklist && scan.checklist.length > 0 && <p className="text-xs text-[#A7A39A]">Checklist: {scan.checklist.filter(item => item.complete).length}/{scan.checklist.length} items marked complete.</p>}
+                        <img src={scan.imageUrl} alt={`${scan.component} evidence`} className="w-full max-h-64 object-contain rounded-lg border border-white/[0.06]" />
+                        <p className="text-[10px] font-mono text-[#7C7870]">Source: {scan.source === 'manual' ? 'Inspector-entered' : 'Preloaded demo record'}. Not an engineering assessment.</p>
                       </article>
                     ))}
                     {reportScans.length === 0 && <p className="text-xs text-[#A7A39A]">No inspection records for this building.</p>}
                   </section>
-                  <section className="space-y-2">
-                    <h3 className="font-semibold text-sm text-[#F5F0E5]">Open follow-up tasks</h3>
+                  <section className="space-y-2.5">
+                    <h3 className="font-semibold text-sm uppercase tracking-wider font-mono text-[#E5C77B]">Open Follow-up Tasks</h3>
                     {workOrders.filter(order => order.buildingId === reportBuilding.id && order.status !== 'Completed').map(order => (
-                      <p key={order.id} className="text-xs">{order.title} · {order.status} · Due {order.dueDate} · {order.assignedTo}</p>
+                      <div key={order.id} className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.06] text-xs flex flex-wrap justify-between gap-2">
+                        <span className="font-medium text-[#F5F0E5]">{order.title}</span>
+                        <span className="font-mono text-[#A7A39A]">{order.status} · Due {order.dueDate} · {order.assignedTo}</span>
+                      </div>
                     ))}
                     {!workOrders.some(order => order.buildingId === reportBuilding.id && order.status !== 'Completed') && <p className="text-xs text-[#A7A39A]">No open tasks.</p>}
                   </section>
-                  <p className="border-t border-[#222222] pt-4 text-[10px] text-[#A7A39A]">Measurements and findings in this prototype are manually recorded or demo data. This document is not a certified structural report.</p>
+                  <p className="border-t border-white/[0.08] pt-4 text-[10px] font-mono text-[#7C7870]">Measurements and findings in this prototype are manually recorded or demo data. This document is not a certified structural report.</p>
                 </> : <p className="text-sm text-[#A7A39A]">No building is available for a report.</p>}
               </div>
             </div>
