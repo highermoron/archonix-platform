@@ -72,7 +72,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   ].join('\n');
 
   try {
-    const models = [process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash'].filter(
+    const models = [process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'].filter(
       (m, i, all): m is string => Boolean(m) && all.indexOf(m) === i
     );
     let response: Response | null = null;
@@ -113,7 +113,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
       const errText = await candidateRes.text().catch(() => '');
       errors.push(`${model} (${candidateRes.status}): ${errText.slice(0, 120)}`);
-      if (candidateRes.status !== 404 && candidateRes.status !== 400) break;
+      if (![400, 404, 429, 500, 503].includes(candidateRes.status)) break;
     }
 
     if (!response) {
