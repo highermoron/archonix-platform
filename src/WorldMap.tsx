@@ -735,7 +735,7 @@ export default function WorldMap({
                 : b.status === 'Inspection Recommended' || b.status === 'Monitoring Required'
                   ? 'bg-amber-400'
                   : 'bg-emerald-400';
-            const shortLabel = b.name.replace(/\s*Demo Structure$/i, '');
+            const shortLabel = b.name.replace(/\s*(Demo\s+(Structure|Building)|Region)$/i, '');
             return (
               <button
                 key={b.id}

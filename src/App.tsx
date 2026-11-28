@@ -678,9 +678,15 @@ export default function App() {
       const matchedDemoKey = isDemoSession ? Object.keys(demoProfiles).find((k) => nameLower.includes(k)) : undefined;
       const demoSeed = matchedDemoKey ? demoProfiles[matchedDemoKey] : undefined;
 
+      const displayName = profile.name
+        .replace(/\s*demo\s+(structure|building)\b/gi, ' Region')
+        .replace(/\s*\bdemo\b\s*/gi, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
       return {
         id: profile.id,
-        name: profile.name,
+        name: displayName,
         location: [profile.street_address, profile.suburb, profile.state, profile.postcode].filter(Boolean).join(', '),
         lat: profile.latitude,
         lng: profile.longitude,
@@ -3053,11 +3059,11 @@ export default function App() {
                           </div>
                         </div>
                         <div className="p-5">
-                          <h3 className="font-bold text-[#F5F0E5] text-base mb-1 group-hover:text-[#F5E6BE] transition-colors">{bld.name}</h3>
-                          <p className="text-xs text-[#A7A39A] mb-3 flex items-center gap-1.5">
-                            <Compass className="w-3.5 h-3.5 text-[#B58B3B] shrink-0" />
+                          <h3 className="font-bold text-[#F5F0E5] text-base mb-2 group-hover:text-[#F5E6BE] transition-colors">{bld.name}</h3>
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#B58B3B]/10 border border-[#B58B3B]/30 text-xs font-medium text-[#F5E6BE] mb-3 max-w-full">
+                            <MapPin className="w-3.5 h-3.5 text-[#E5C77B] shrink-0" />
                             <span className="truncate">{bld.location}</span>
-                          </p>
+                          </div>
                           <p className="text-xs text-[#A7A39A] leading-relaxed line-clamp-2">{bld.description}</p>
                         </div>
                       </div>
