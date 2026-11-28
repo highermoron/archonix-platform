@@ -191,9 +191,9 @@ export async function processSpatialAIQuery(
     finalSummary = gemini.summary;
     if (gemini.hints && gemini.hints.length > 0) finalHints = gemini.hints;
     if (gemini.appliedClauses && gemini.appliedClauses.length > 0) {
-      finalClauses = ['Gemini 2.5 Flash', ...gemini.appliedClauses];
+      finalClauses = ['Gemini AI', ...gemini.appliedClauses];
     } else {
-      finalClauses = ['Gemini 2.5 Flash', ...finalClauses];
+      finalClauses = ['Gemini AI', ...finalClauses];
     }
     if (gemini.intent) finalIntent = gemini.intent;
 

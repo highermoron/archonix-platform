@@ -104,9 +104,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   ].join('\n');
 
   try {
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    const models = [process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-2.5-flash'].filter(
+      (m, i, all): m is string => Boolean(m) && all.indexOf(m) === i
+    );
     let response: Response | null = null;
-    let lastError = '';
+    const errors: string[] = [];
 
     for (const model of models) {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -138,12 +140,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         break;
       }
       const errText = await candidateRes.text().catch(() => '');
-      lastError = `${model} (${candidateRes.status}): ${errText.slice(0, 180)}`;
-      if (candidateRes.status !== 404) break;
+      errors.push(`${model} (${candidateRes.status}): ${errText.slice(0, 120)}`);
+      if (candidateRes.status !== 404 && candidateRes.status !== 400) break;
     }
 
     if (!response) {
-      return res.status(502).json({ error: `Gemini API error — ${lastError}` });
+      return res.status(502).json({ error: `Gemini API error — ${errors.join(' | ')}` });
     }
 
     const data = (await response.json()) as {
