@@ -126,7 +126,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           ],
           generationConfig: {
             temperature: 0.2,
+            maxOutputTokens: 512,
             responseMimeType: 'application/json',
+            ...(model === 'gemini-2.5-flash' ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
           },
         }),
       });
